@@ -1,6 +1,6 @@
 [project]
 name = "upc-mcp"
-version = "0.1.0"
+version = "1.2"
 description = "Local, account-bound UPC campus services and settings"
 requires-python = ">=3.12"
 readme = "README.md"
@@ -38,7 +38,7 @@ packages = ["src/upc_mcp"]
 include = [
   "/src", "/tests", "/scripts", "/examples/mcp-config.example.json",
   "/docs/assets", "/docs/CONFIGURATION.md", "/docs/AGENT_SETUP.md",
-  "/docs/FEATURES.md", "/docs/PRIVACY.md", "/docs/ARCHITECTURE.md",
+  "/docs/FEATURES.md", "/docs/BUG4_STATUS.md", "/docs/PRIVACY.md", "/docs/ARCHITECTURE.md",
   "/README.md", "/CHANGELOG.md", "/LICENSE", "/THIRD_PARTY_NOTICES.md",
   "/pyproject.toml", "/uv.lock", "/打开本地设置.cmd", "/安装.cmd",
 ]

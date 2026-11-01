@@ -2,7 +2,7 @@
 
 ```mermaid
 flowchart LR
-    AI[支持 MCP 的 AI 客户端] --> MCP[本地 stdio MCP · 22 工具]
+    AI[支持 MCP 的 AI 客户端] --> MCP[本地 stdio MCP · 23 工具]
     UI[本地设置页 / CLI] --> Cred[DPAPI 统一凭据]
     Cred --> CAS[CAS 协调器]
     MCP --> Public[匿名查询适配器]

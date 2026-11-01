@@ -16,7 +16,7 @@ import zipfile
 from pathlib import Path, PurePosixPath
 
 BLOCKED_PARTS = {
-    ".git", ".venv", ".local", ".superdesign", ".playwright-mcp", ".uv-cache",
+    ".git", ".venv", ".local", ".superdesign", ".playwright-mcp", ".playwright-cli", ".uv-cache",
     ".pytest_cache", ".ruff_cache", "__pycache__", "state", "private", "browser-profile",
 }
 BLOCKED_SUFFIXES = {".dpapi", ".har", ".saz", ".pyc", ".log"}

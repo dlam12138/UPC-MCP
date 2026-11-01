@@ -1,10 +1,10 @@
 # Changelog
 
-## Unreleased
+## 1.2 — 2026-11-01
 
-These changes are workspace-only. `v0.1.0` remains the published release and
-the consumer continues to pin that artifact; no tag, release asset, or
-consumer version is changed here.
+本版汇总 Bug 1–4：修复空闲教室占用判断、余额学号绑定、课表日期与漏查风险、e站通登录目录检索。共 23 个工具（21 只读、2 写操作）。
+
+升级后需重启 MCP 并刷新工具 schema；固定旧 wheel/hash/catalog 的宿主适配器需显式升级。不会覆盖 `v0.1.0` 资产，也不会自动更新宿主配置。升级步骤见 [配置指南](docs/CONFIGURATION.md#从-010-升级到-12)。
 
 ### Added
 
@@ -13,7 +13,7 @@ consumer version is changed here.
   `time_range`, stable date/period ordering, and `counts.total/returned/
   complete`. `upc_timetable_range` adds a bounded natural-date range
   (maximum 14 days and three teaching weeks) with every course instance across
-  the required weeks; this is one new read-only tool (workspace total 23).
+  the required weeks; this is one new read-only tool (release total 23).
 - Free classrooms expose an explicit scope: `mode=auto|overview|full`,
   `buildings=[1–2 ids]`, and per-room `availability`. `overview` returns
   per-building totals and candidates from one `search-all`, without returning

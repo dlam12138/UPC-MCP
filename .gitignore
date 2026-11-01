@@ -2,6 +2,7 @@
 .local/
 .superdesign/
 .playwright-mcp/
+.playwright-cli/
 .uv-cache/
 .pytest-tmp/
 .pytest-tmp*/

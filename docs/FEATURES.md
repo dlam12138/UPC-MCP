@@ -39,7 +39,7 @@
 - 部分系统暂无独立本人身份字段，状态如实返回 `identity_verified=false`；图书馆有独立本人校验。
 - 空闲教室支持 `mode=auto|overview|full`：`building="全部"` 默认只返回按楼汇总（`overview`），不返回房间级空闲列表；选定 1–2 栋后走 `full`，对该范围所有房间逐间对照 `detail` 记录。
 - 用户已明确 1–2 栋教学楼时，直接按该范围查询，不要重复追问；只有“全部教学楼”才先返回概览并请用户收窄。
-- `available` 仅表示 `search-all` 与 `detail` 的学校记录在所选节次均未显示占用，不是现场空位、预约或准入证明；`availability_certainty`/`request_complete` 分别表示学校记录覆盖度和可用性确定程度。
+- `available` 仅表示 `search-all` 与 `detail` 的学校记录在所选节次均未显示占用，不是现场空位、预约或准入证明；`availability_certainty` 表示记录层面的可用性确定程度，`request_complete` 仅表示请求是否完成。
 - `overview` 的 `counts.candidates` 只是 `search-all` 的候选数，不是最终空闲数；必须再选楼对照。
 - 房间级 `occupied` 只在记录确定时为 `true/false`；`occupancy_unknown=true` 时为 `null`，不能用 `false` 推断可用。`availability` 明确区分 `available/occupied/unknown/conflict/reserved`。
 - `full` 中 `search-all` 标占用、`detail` 未显示占用的房间是证据冲突：保留 `occupancy_unknown=true`、`availability=conflict/reserved`，绝不升级为 `available`；另列 `conflict_candidates`。`include_conflicts` 已弃用，不再改变可用性。

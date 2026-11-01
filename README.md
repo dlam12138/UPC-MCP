@@ -34,22 +34,24 @@ UPC-MCP 将课表、空闲教室、校园卡、石光、图书馆和 e站通接�
 
 **23 个工具中，21 个只读，2 个提交操作。** 报名与预约只有在用户明确选择目标并要求提交时才调用；结果未知时不自动重发。[查看全部工具与覆盖边界 →](docs/FEATURES.md)
 
+**v1.2 更新：** 修复教室占用判断、余额学号绑定、课表日期错位和 e站通登录目录漏项；新增自然日期范围课表查询。旧版用户请按[升级指南](docs/CONFIGURATION.md#从-010-升级到-12)保留原状态目录并刷新客户端工具列表。
+
 ## 开始使用
 
-**需要：Windows 10/11、Python 3.12+、支持 stdio MCP 的 AI 客户端。** 首版不捆绑 Python，账号存储使用 Windows DPAPI。
+**需要：Windows 10/11、Python 3.12+、支持 stdio MCP 的 AI 客户端。** 当前版本不捆绑 Python，账号存储使用 Windows DPAPI。
 
 ### 1. 下载并安装
 
-在 [Releases](https://github.com/dlam12138/UPC-MCP/releases/latest) 下载 `UPC-MCP-v0.1.0-source.zip`，解压到自己的目录，例如 `E:/CampusMCP`，双击 **安装.cmd**。
+在 [Releases](https://github.com/dlam12138/UPC-MCP/releases/latest) 下载 `UPC-MCP-v1.2-source.zip`，解压到自己的目录，例如 `E:/CampusMCP`，双击 **安装.cmd**。
 
 安装器会在项目内创建 `.venv`、安装依赖并打开设置页，不替换全局 Python。也可以用 Git：
 
 ```powershell
-git clone https://github.com/dlam12138/UPC-MCP.git E:/CampusMCP
+git clone --branch v1.2 --depth 1 https://github.com/dlam12138/UPC-MCP.git E:/CampusMCP
 powershell -NoProfile -ExecutionPolicy Bypass -File E:/CampusMCP/scripts/setup.ps1
 ```
 
-安装时需要联网下载依赖。习惯直接安装 wheel 的用户，可下载 `upc_mcp-0.1.0-py3-none-any.whl`；步骤见[配置指南](docs/CONFIGURATION.md#方式三安装-wheel)。
+安装时需要联网下载依赖。习惯直接安装 wheel 的用户，可下载 `upc_mcp-1.2-py3-none-any.whl`；步骤见[配置指南](docs/CONFIGURATION.md#方式三安装-wheel)。
 
 ### 2. 在本机配置账号
 
@@ -79,13 +81,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -File E:/CampusMCP/scripts/setup.p
 把下面这段交给有本机终端能力的 Agent。它负责安装和接入，你负责在本机页面填写密码：
 
 ```text
-请从 https://github.com/dlam12138/UPC-MCP 安装 UPC-MCP，使用我指定的目录。
+请从 https://github.com/dlam12138/UPC-MCP/releases/tag/v1.2 下载固定 v1.2，
+核对同一 Release 的 SHA256SUMS，安装到我指定的目录。
 先读 README.md、docs/CONFIGURATION.md 和 docs/AGENT_SETUP.md。
 用 scripts/setup.ps1 -NoBrowser 安装到项目虚拟环境，
 再用 upc-mcp mcp-config 生成真实配置，并合并到我当前客户端的 MCP 配置。
 保留其他 MCP 服务，设置页和 MCP 使用同一状态目录。
 启动 upc-mcp settings，让我在本机页面自行填写账号密码；不要让我把密码发到聊天。
 接入后检查 list_tools（预期 23 项）和 upc_capabilities。
+记录包版本、Release tag 和资产 SHA256，方便复现 bug；不要上传个人业务数据。
 不要在安装测试中提交报名、预约、申请或签到。
 如果你没有修改客户端配置的权限，请给出准确配置和操作入口，不要声称已完成接入。
 ```
@@ -102,10 +106,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File E:/CampusMCP/scripts/setup.p
 
 [隐私与发布审计说明 →](docs/PRIVACY.md)
 
-## 首版的明确边界
+## 当前版本的明确边界
 
 - 学校可能要求验证码或二次验证；不承诺永久免交互。
-- 课表按周查询；工作区新增最多 14 天的自然日期范围工具（Unreleased），没有整学期工具；e站通待办/在办申请按页返回，`total`、`has_more`、`complete_for_page`、`complete_for_scope` 明确区分单页与全部范围，不声称未读取的页已查完。
+- 课表按周查询；支持最多 14 天的自然日期范围工具，没有整学期工具；e站通待办/在办申请按页返回，`total`、`has_more`、`complete_for_page`、`complete_for_scope` 明确区分单页与全部范围，不声称未读取的页已查完。
 - 学校未提供的学分要求、流程节点或进度保持未知。
 - 报名、预约提交已有代码与合成测试，**未通过真实提交作为发布验收**；安装和 CI 不会替用户提交。
 - 不提供校园卡流水、签到/补签、取消报名、自动抢座或 e站通代提交。
@@ -128,7 +132,7 @@ uv build
 | [功能范围](docs/FEATURES.md) | 23 工具与实际覆盖 |
 | [架构](docs/ARCHITECTURE.md) | 模块、认证、会话与故障隔离 |
 | [隐私](docs/PRIVACY.md) | 凭据、AI 查询数据和发布内容 |
-| [更新日志](CHANGELOG.md) | 首版交付与已知限制 |
+| [更新日志](CHANGELOG.md) | 版本变更、升级迁移与已知限制 |
 | [第三方声明](THIRD_PARTY_NOTICES.md) | 协议参考、字体和依赖 |
 
 MIT License。界面字体按 SIL Open Font License 分发，详见第三方声明。学校页面和接口变更可能需要更新适配器。
