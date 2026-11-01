@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "upc": {
+      "command": "E:/CampusMCP/.venv/Scripts/upc-mcp.exe",
+      "args": ["--state-dir", "E:/CampusMCP/data", "serve"]
+    }
+  }
+}

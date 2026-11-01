@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>UPC-MCP · 本地设置</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/assets/settings.css">
+  <script src="/assets/settings.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#account">跳到账号设置</a>
+  <aside class="rail">
+    <div>
+      <div class="wordmark">UPC<span>—</span>MCP</div>
+      <p class="rail-caption">校园服务，连接就绪。</p>
+      <div class="rail-divider"></div>
+      <nav aria-label="设置导航">
+        <a class="nav-link active" href="#account">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3.5"/><path d="M5 20v-2a7 7 0 0 1 14 0v2"/></svg>
+          账号与连接 <span class="nav-arrow">↗</span>
+        </a>
+        <a class="nav-link" href="#mcp">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 6 5 6-5 6m8 0h6"/></svg>
+          MCP 接入
+        </a>
+      </nav>
+    </div>
+    <div class="rail-bottom">
+      <div class="local-mark"><span class="dot"></span> 仅在本机运行</div>
+      <p>一个学校账号<br>连接日常校园服务</p>
+      <button id="close-settings" class="rail-close" type="button">结束本次设置 <span>↗</span></button>
+    </div>
+  </aside>
+
+  <main>
+    <header class="page-header" id="account">
+      <p class="eyebrow">YOUR CAMPUS, CONNECTED</p>
+      <div class="title-line"><h1>账号与连接</h1><span class="local-badge"><span class="dot"></span>本机保存</span></div>
+      <p class="page-intro">配置一次学校账号，让查询自然发生。</p>
+    </header>
+
+    <div id="message" class="notice" role="status" aria-live="polite" hidden></div>
+
+    <div class="settings-grid">
+      <section class="panel account-panel" aria-labelledby="account-title">
+        <div class="section-heading"><span class="section-number">01</span><h2 id="account-title">学校账号</h2><span id="credential-state" class="pill neutral">读取中</span></div>
+        <p id="account-description" class="section-description">保存后，查询时会自动建立各服务的登录会话。</p>
+        <form id="credential-form" autocomplete="off">
+          <div class="field">
+            <label for="username">学号 / 学校账号</label>
+            <input id="username" name="username" type="text" placeholder="请输入学校统一认证账号" maxlength="128" autocomplete="off" autocapitalize="none" spellcheck="false" required disabled>
+          </div>
+          <div class="field">
+            <div class="label-line"><label for="password">密码</label><button id="toggle-password" type="button" class="quiet-button" aria-pressed="false" aria-label="显示密码">显示</button></div>
+            <input id="password" name="password" type="password" placeholder="输入学校统一认证密码" maxlength="512" autocomplete="new-password" required disabled>
+          </div>
+          <div class="field">
+            <label for="password-confirm">确认密码</label>
+            <input id="password-confirm" name="password_confirm" type="password" placeholder="请再次输入密码" maxlength="512" autocomplete="new-password" required disabled>
+          </div>
+          <p id="form-error" class="field-error" role="alert" hidden></p>
+          <div class="form-actions"><button id="save-account" type="submit" class="primary-button" disabled>保存账号 <span aria-hidden="true">↗</span></button><button id="clear-account" type="button" class="text-button danger" disabled>移除已保存凭据</button></div>
+        </form>
+        <div class="account-footnote"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="10" width="12" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg><p>密码加密保存在这台电脑，<br>不会写入 MCP 配置或聊天记录。</p></div>
+      </section>
+
+      <section class="panel connections-panel" aria-labelledby="connections-title">
+        <div class="section-heading"><span class="section-number">02</span><h2 id="connections-title">服务连接</h2><button id="refresh-status" class="icon-button" type="button" title="刷新本地状态" aria-label="刷新本地状态"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M6.5 6.5a7.8 7.8 0 0 1 12.3 1L20 12M4 12l1.2 4.5a7.8 7.8 0 0 0 12.3 1"/></svg></button></div>
+        <p class="section-description">共用学校账号，各自管理连接。</p>
+        <div id="service-list" class="service-list" aria-live="polite"><p class="loading-placeholder">正在读取本地连接状态…</p></div>
+        <div class="connection-note"><span class="small-label">关于连接状态</span><p>“已保存会话”表示本机有登录记录。点击“检查”才会访问对应学校服务并验证连接。</p></div>
+        <div class="anonymous-note"><span class="dot"></span><p>空闲教室、e站通公开指南无需登录。<br>校园卡余额使用独立的本人学号配置。</p></div>
+      </section>
+    </div>
+
+    <section class="mcp-panel" id="mcp" aria-labelledby="mcp-title">
+      <div class="mcp-heading"><div><p class="eyebrow">READY FOR YOUR ASSISTANT</p><h2 id="mcp-title">接入你的 AI 客户端</h2></div><button class="copy-button" id="copy-config" type="button" disabled>复制 MCP 配置 <span aria-hidden="true">⧉</span></button></div>
+      <div class="mcp-content"><div class="mcp-explanation"><span class="step-label">MCP / STDIO</span><h3>复制配置，即可连接。</h3><p>在客户端的 MCP 设置中添加此配置。账号在本页面管理，配置里无需填写密码。</p><div class="config-note"><span class="dot"></span>现有 MCP 工具保持可用</div></div><pre id="mcp-config" aria-label="MCP 客户端配置" tabindex="0">正在读取启动配置…</pre></div>
+    </section>
+    <footer class="page-footer"><span>UPC-MCP <span class="footer-separator">/</span> 本地设置</span><button id="close-settings-mobile" class="mobile-close text-button" type="button">结束设置</button><details><summary>查看本地存储位置</summary><p id="state-directory"></p></details></footer>
+  </main>
+
+  <dialog id="clear-dialog" aria-labelledby="clear-title" aria-describedby="clear-description">
+    <div class="dialog-content"><span class="section-number">账号管理</span><h2 id="clear-title">移除统一凭据？</h2><p id="clear-description">会移除这台电脑保存的学校账号、密码和共同登录记录。余额配置保留；已绑定统一账号的服务需要重新配置账号后才能继续使用。</p><div class="dialog-actions"><button id="cancel-clear" class="secondary-button" type="button" autofocus>保留凭据</button><button id="confirm-clear" class="primary-button danger-button" type="button">确认移除</button></div></div>
+  </dialog>
+</body>
+</html>
