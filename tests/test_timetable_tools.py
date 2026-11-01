@@ -35,6 +35,20 @@ class FakeService:
             "counts": {"courses": 1, "unique_courses": 1},
         }
 
+    async def range(self, year: str, term: str, start_date: str, end_date: str):
+        if year != "2026-2027":
+            raise TimetableError("invalid_input", "no such term")
+        return {
+            "status": "ok",
+            "source_system": "timetable",
+            "session_ref": "self",
+            "term": {"year": year, "term": term},
+            "range": {"start_date": start_date, "end_date": end_date, "complete": True},
+            "courses": [{"course_name": "示例课程", "date": start_date}],
+            "counts": {"total": 1, "returned": 1, "complete": True},
+            "complete": True,
+        }
+
 
 def build_server():
     server = MCPServer("timetable-test")
@@ -47,7 +61,11 @@ def test_inprocess_tool_discovery_and_schemas():
         async with Client(build_server()) as client:
             tools = (await client.list_tools()).tools
             by_name = {tool.name: tool for tool in tools}
-            assert set(by_name) == {"upc_timetable_terms", "upc_timetable_week"}
+            assert set(by_name) == {
+                "upc_timetable_terms",
+                "upc_timetable_week",
+                "upc_timetable_range",
+            }
             week = by_name["upc_timetable_week"]
             assert week.annotations.read_only_hint is True
             assert week.annotations.destructive_hint is False
@@ -59,6 +77,21 @@ def test_inprocess_tool_discovery_and_schemas():
             }
             assert set(week.input_schema["required"]) == {"year", "term", "week"}
             assert week.input_schema["properties"]["week"]["minimum"] == 1
+            range_tool = by_name["upc_timetable_range"]
+            assert range_tool.annotations.read_only_hint is True
+            assert set(range_tool.input_schema["properties"]) == {
+                "year",
+                "term",
+                "start_date",
+                "end_date",
+                "session_ref",
+            }
+            assert set(range_tool.input_schema["required"]) == {
+                "year",
+                "term",
+                "start_date",
+                "end_date",
+            }
             assert "url" not in json.dumps(week.input_schema).lower()
             assert "cookie" not in json.dumps(week.input_schema).lower()
 
@@ -77,6 +110,18 @@ def test_inprocess_tool_calls_and_error_mapping():
             )
             assert week.is_error is False
             assert week.structured_content["counts"]["courses"] == 1
+            ranged = await client.call_tool(
+                "upc_timetable_range",
+                {
+                    "year": "2026-2027",
+                    "term": "1",
+                    "start_date": "2026-10-25",
+                    "end_date": "2026-10-31",
+                },
+            )
+            assert ranged.is_error is False
+            assert ranged.structured_content["counts"]["total"] == 1
+            assert ranged.structured_content["complete"] is True
             bad = await client.call_tool(
                 "upc_timetable_week",
                 {"year": "2099-2100", "term": "1", "week": 1},

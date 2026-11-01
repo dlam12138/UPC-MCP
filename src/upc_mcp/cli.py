@@ -119,7 +119,9 @@ async def execute_shiguang(args, store: ShiguangStore):
 
 
 async def execute_card_balance(args, directory: Path):
-    service = CardBalanceService(CardBalanceStore(directory))
+    service = CardBalanceService(
+        CardBalanceStore(directory), credentials=create_auto_auth(directory).credentials
+    )
     if args.balance_action == "configure":
         student_id = getpass.getpass("本人学号（仅本机保存，输入隐藏）：")
         return await asyncio.to_thread(service.configure, student_id)

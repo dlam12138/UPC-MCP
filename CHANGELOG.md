@@ -8,6 +8,12 @@ consumer version is changed here.
 
 ### Added
 
+- Timetable `upc_timetable_week` output now carries `week_start`/`week_end`,
+  per-instance `instance_id`, `weekday_label`, `teaching_day_index`,
+  `time_range`, stable date/period ordering, and `counts.total/returned/
+  complete`. `upc_timetable_range` adds a bounded natural-date range
+  (maximum 14 days and three teaching weeks) with every course instance across
+  the required weeks; this is one new read-only tool (workspace total 23).
 - Free classrooms expose an explicit scope: `mode=auto|overview|full`,
   `buildings=[1–2 ids]`, and per-room `availability`. `overview` returns
   per-building totals and candidates from one `search-all`, without returning
@@ -42,6 +48,25 @@ consumer version is changed here.
   available; conflicts are only exposed through `conflict_candidates`.
 
 ### Fixed
+
+- Campus-card balance now uses the locally saved unified account's student ID
+  automatically. Rebinding follows the new account; clearing credentials blocks
+  fallback to a stale standalone profile. In-flight results are discarded after
+  credential changes. The anonymous balance endpoint receives no password or
+  CAS session. Standalone configuration remains available for balance-only users
+  who have never configured unified credentials.
+
+- Timetable: the original release selected a course date with
+  `weekdays[ISO weekday - 1]` even though the school array starts on Sunday.
+  Monday courses could receive Sunday's date; the parser now matches each
+  course's ISO weekday to the explicit weekdays date and refuses unknown
+  conflicts. This is the source-level date fix previously worked around by the
+  personal-assistant host adapter.
+- Timetable: a partial date-by-date query could infer a later week from
+  `weeks` and omit courses that start in that later week. The new range query
+  reads every required week, returns all instances with real dates, and fails
+  as a whole if any required week fails; it never returns a partial empty
+  timetable as complete.
 
 - Free classrooms: `search-all`'s `d.js` is not a reliable union. In tested
   samples, multiple periods behaved as an intersection and `d.js` omitted

@@ -257,7 +257,7 @@ def test_corrupt_credential_does_not_break_tools_or_anonymous_features(tmp_path,
 
     async def scenario():
         async with Client(create_server(tmp_path)) as client:
-            assert len((await client.list_tools()).tools) == 22
+            assert len((await client.list_tools()).tools) == 23
             assert not (await client.call_tool("upc_capabilities", {})).is_error
             classrooms = await client.call_tool("upc_free_classrooms", {
                 "campus": "invalid", "date": "2026-11-01", "periods": [1],

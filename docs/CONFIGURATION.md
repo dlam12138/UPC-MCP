@@ -85,7 +85,10 @@ wheel 已包含设置页面和字体，不需要另装 Node.js 或启动前端�
 
 CLI 输入隐藏。更换账号或密码使用 `credential configure --rebind`。已明确绑定另一个账号的业务会话会拒绝静默覆盖，需要先对相应系统执行 `shiguang clear`、`timetable clear`、`library clear` 或 `service-portal clear`，再查询。清除统一凭据用 `credential clear`。
 
-校园卡余额另需一次本人学号配置：
+校园卡余额优先使用统一账号中的学号（8–16 位数字），无需重复填写。
+账号更换后立即跟随新学号；清除统一凭据后不会退回旧的余额学号。
+密码不会发送到余额接口，查询不触发 CAS 登录。已有统一账号时，不允许单独配置其他余额学号。
+仅从未配置统一账号、只使用余额的安装仍可单独配置：
 
 ```powershell
 & E:/CampusMCP/.venv/Scripts/upc-mcp.exe card-balance configure

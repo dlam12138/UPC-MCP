@@ -12,7 +12,7 @@ import asyncio
 from pathlib import Path
 from typing import Literal
 
-from .card_balance import CardBalanceClient, CardBalanceError, CardBalanceSnapshot
+from .card_balance import CardBalanceClient, CardBalanceError, CardBalanceSnapshot, valid_student_id
 from .card_balance_profile import CardBalanceProfile, CardBalanceStore, now
 
 
@@ -21,10 +21,49 @@ class CardBalanceService:
         self,
         store: CardBalanceStore,
         client: CardBalanceClient | None = None,
+        *,
+        credentials=None,
     ):
         self.store = store
         self.client = client or CardBalanceClient()
+        self.credentials = credentials
         self._query_lock = asyncio.Lock()
+
+    def _unified_identity(self):
+        """Read only the local identity; never log in or send a password."""
+        if self.credentials is None:
+            return None
+        from .auto_auth.errors import AutoAuthError
+
+        try:
+            binding = self.credentials.snapshot()
+            if not binding.configured:
+                if binding.generation:
+                    raise CardBalanceError(
+                        "not_configured", "统一账号已移除，请在本地设置页重新保存学号。"
+                    )
+                return None  # Compatibility for standalone balance-only installations.
+            credential = self.credentials.load()
+            student_id = credential.username
+            binding = credential.binding
+            del credential
+            if not valid_student_id(student_id):
+                raise CardBalanceError(
+                    "invalid_student_id", "已保存的学校账号不是有效学号，请更新本地账号。"
+                )
+            return student_id, binding
+        except AutoAuthError:
+            raise CardBalanceError(
+                "local_error", "无法读取本机统一账号，请检查本地设置。"
+            ) from None
+
+    @staticmethod
+    def _unified_status() -> dict:
+        return {
+            "status": "ok", "source_system": "card_balance", "configured": True,
+            "profile": {"state": "configured", "source": "unified_account",
+                        "identity_checked": False},
+        }
 
     def configure(
         self,
@@ -39,6 +78,13 @@ class CardBalanceService:
         formal local binding.
         """
         profile = CardBalanceProfile.new(student_id, source=source)
+        unified = self._unified_identity()
+        if unified is not None:
+            if student_id != unified[0]:
+                raise CardBalanceError(
+                    "account_mismatch", "余额学号跟随统一账号，请在本地设置页更换账号。"
+                )
+            return self._unified_status()
         existing, _generation = self.store.snapshot()
         if existing is not None:
             current_id = existing.student_id.get_secret_value()
@@ -82,6 +128,8 @@ class CardBalanceService:
 
     def status(self) -> dict:
         """Report configuration state without the student number or revision."""
+        if self._unified_identity() is not None:
+            return self._unified_status()
         profile = self.store.load()
         return self._status(profile)
 
@@ -102,6 +150,11 @@ class CardBalanceService:
 
     def clear(self) -> dict:
         self.store.clear()
+        if self.credentials is not None and self.credentials.snapshot().configured:
+            return {
+                **self.status(), "local_profile_removed": True, "remote_changed": False,
+                "message": "独立余额配置已移除；余额仍跟随统一账号，停用请移除统一凭据。",
+            }
         return {
             "status": "ok",
             "source_system": "card_balance",
@@ -113,6 +166,18 @@ class CardBalanceService:
     async def query(self) -> dict:
         """Query the locally configured card; no student id is accepted here."""
         async with self._query_lock:
+            unified = await asyncio.to_thread(self._unified_identity)
+            if unified is not None:
+                student_id, binding = unified
+                snapshot = await self.client.fetch(student_id)
+                current = await asyncio.to_thread(self.credentials.snapshot)
+                if not binding.matches(current):
+                    raise CardBalanceError(
+                        "profile_changed", "统一账号已清除或更换，本次余额结果已丢弃。"
+                    )
+                result = self._result(snapshot)
+                result["query"]["student_scope"] = "unified_account"
+                return result
             # DPAPI/file locks are blocking. Keep them off the event loop so a
             # contended balance lock cannot stall Shiguang or another MCP tool.
             profile, generation = await asyncio.to_thread(self.store.snapshot)
@@ -122,6 +187,12 @@ class CardBalanceService:
                     "本机尚未配置本人余额学号，请先在本地完成配置。",
                 )
             snapshot = await self.client.fetch(profile.student_id.get_secret_value())
+
+            # A unified account saved during a standalone query becomes the authority.
+            if await asyncio.to_thread(self._unified_identity) is not None:
+                raise CardBalanceError(
+                    "profile_changed", "统一账号已配置，本次旧余额结果已丢弃。"
+                )
 
             # Never return a result that belongs to a profile cleared or
             # rebound while the network request was in flight.

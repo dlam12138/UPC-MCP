@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+from datetime import date
 from pathlib import Path
+from urllib.parse import parse_qs
 
 import httpx
 import pytest
@@ -80,6 +82,157 @@ def test_terms_and_week_payload(tmp_path):
     assert week["counts"]["unique_courses"] == 5
     assert week["courses"][0]["course_name"] == "示例课程日"
     assert week["session"]["identity_verified"] is False
+
+
+def test_week_dates_follow_iso_weekday_not_sunday_array_index(tmp_path):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, json=fixture("timetable_index.json"))
+        return httpx.Response(200, json=fixture("timetable_week_08.json"))
+
+    service = make_service(tmp_path, handler)
+    week = run(service.week("2026-2027", "1", 8))
+    weekdays = [date.fromisoformat(value) for value in week["weekdays"]]
+    assert week["week_start"] == "2026-10-25"
+    assert week["week_end"] == "2026-10-31"
+    assert week["counts"]["total"] == week["counts"]["returned"] == 6
+    assert week["counts"]["complete"] is True
+    assert week["complete"] is True
+    assert week["calendar"]["week_starts_on"] == "sunday"
+    keys = []
+    for course in week["courses"]:
+        expected = next(
+            day for day in weekdays if day.isoweekday() == course["weekday"]
+        )
+        assert course["date"] == expected.isoformat()
+        assert course["weekday_label"] == {
+            1: "周一",
+            2: "周二",
+            3: "周三",
+            4: "周四",
+            5: "周五",
+            6: "周六",
+            7: "周日",
+        }[course["weekday"]]
+        assert course["teaching_day_index"] == course["weekday"] % 7 + 1
+        assert len(course["instance_id"]) == 16
+        keys.append((course["date"], course["start_period"], course["end_period"]))
+    assert keys == sorted(keys)
+
+
+def test_range_crosses_weeks_and_returns_every_instance(tmp_path):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, json=fixture("timetable_index.json"))
+        week = int(parse_qs(request.content.decode())["week"][0])
+        name = "timetable_week_08.json" if week == 8 else "timetable_week_09_empty.json"
+        return httpx.Response(200, json=fixture(name))
+
+    service = make_service(tmp_path, handler)
+    payload = run(
+        service.range(
+            "2026-2027", "1", "2026-10-25", "2026-11-01"
+        )
+    )
+    assert payload["status"] == "ok"
+    assert payload["range"]["weeks"] == [8, 9]
+    assert payload["range"]["complete"] is True
+    assert payload["range"]["days"] == 8
+    assert len(payload["days"]) == 8
+    assert payload["courses"]
+    assert payload["counts"]["total"] == payload["counts"]["returned"] == 6
+    assert payload["counts"]["complete"] is True
+    assert payload["complete"] is True
+    assert len({course["instance_id"] for course in payload["courses"]}) == 6
+    for course in payload["courses"]:
+        assert "2026-10-25" <= course["date"] <= "2026-11-01"
+        assert course["date"] == next(
+            day["date"]
+            for day in payload["days"]
+            if date.fromisoformat(day["date"]).isoweekday() == course["weekday"]
+        )
+
+
+def test_range_empty_week_is_complete_empty(tmp_path):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, json=fixture("timetable_index.json"))
+        return httpx.Response(200, json=fixture("timetable_week_09_empty.json"))
+
+    payload = run(
+        make_service(tmp_path, handler).range(
+            "2026-2027", "1", "2026-11-01", "2026-11-07"
+        )
+    )
+    assert payload["status"] == "empty"
+    assert payload["courses"] == []
+    assert payload["counts"]["total"] == payload["counts"]["returned"] == 0
+    assert payload["counts"]["complete"] is True
+    assert payload["range"]["complete"] is True
+
+
+def test_range_fails_when_required_week_fails(tmp_path):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, json=fixture("timetable_index.json"))
+        week = int(parse_qs(request.content.decode())["week"][0])
+        if week == 8:
+            return httpx.Response(500, text="upstream failure")
+        return httpx.Response(200, json=fixture("timetable_week_09_empty.json"))
+
+    service = make_service(tmp_path, handler)
+    with pytest.raises(TimetableError) as caught:
+        run(service.range("2026-2027", "1", "2026-10-25", "2026-11-01"))
+    assert caught.value.code == "upstream_error"
+
+
+def test_range_rejects_unbounded_or_invalid_dates(tmp_path):
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.method)
+        return httpx.Response(200, json=fixture("timetable_index.json"))
+
+    service = make_service(tmp_path, handler)
+    with pytest.raises(TimetableError) as caught:
+        run(service.range("2026-2027", "1", "2026-10-25", "2026-11-08"))
+    assert caught.value.code == "invalid_input"
+    with pytest.raises(TimetableError) as caught:
+        run(service.range("2026-2027", "1", "2026/10/25", "2026-10-31"))
+    assert caught.value.code == "invalid_input"
+    assert calls == []
+
+
+def test_range_real_case_shape_returns_all_instances(tmp_path):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, json=fixture("timetable_index.json"))
+        return httpx.Response(200, json=fixture("timetable_week_10_case.json"))
+
+    payload = run(
+        make_service(tmp_path, handler).range(
+            "2026-2027", "1", "2026-11-08", "2026-11-14"
+        )
+    )
+    assert payload["status"] == "ok"
+    assert payload["range"]["weeks"] == [10]
+    assert payload["range"]["complete"] is True
+    assert payload["counts"]["total"] == payload["counts"]["returned"] == 7
+    assert payload["counts"]["unique_courses"] == 6
+    assert [course["date"] for course in payload["courses"]] == [
+        "2026-11-09",
+        "2026-11-10",
+        "2026-11-10",
+        "2026-11-12",
+        "2026-11-12",
+        "2026-11-13",
+        "2026-11-13",
+    ]
+    assert len({course["instance_id"] for course in payload["courses"]}) == 7
+    repeated = [course for course in payload["courses"] if course["course_name"] == "合成课程乙"]
+    assert len(repeated) == 2
+    assert repeated[0]["date"] != repeated[1]["date"]
+    assert repeated[0]["instance_id"] != repeated[1]["instance_id"]
 
 
 def test_empty_week_is_empty_status(tmp_path):

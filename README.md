@@ -7,7 +7,7 @@
 [![Release](https://img.shields.io/github/v/release/dlam12138/UPC-MCP?color=355e45&label=release)](https://github.com/dlam12138/UPC-MCP/releases)
 [![Windows CI](https://github.com/dlam12138/UPC-MCP/actions/workflows/ci.yml/badge.svg)](https://github.com/dlam12138/UPC-MCP/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/Python-3.12%2B-355e45)
-![Tools](https://img.shields.io/badge/MCP_tools-22-708b46)
+![Tools](https://img.shields.io/badge/MCP_tools-23-708b46)
 [![License](https://img.shields.io/badge/license-MIT-708b46)](LICENSE)
 
 [开始使用](#开始使用) · [让 Agent 配置](#让-agent-配置) · [功能范围](docs/FEATURES.md) · [完整配置指南](docs/CONFIGURATION.md) · [下载 Release](https://github.com/dlam12138/UPC-MCP/releases)
@@ -28,11 +28,11 @@ UPC-MCP 将课表、空闲教室、校园卡、石光、图书馆和 e站通接�
 | 空闲教室 | 唐岛湾 / 古镇口，按日期和节次；全部范围先给按楼概览，1–2 栋逐间对照学校记录 | 1 |
 | 石光第二课堂 | 活动搜索与详情、参与记录、学分学时、成绩单、报名 | 6 |
 | 图书馆 | 馆区、房间、座位、时段、本人预约、预约提交 | 6 |
-| 校园 App 课表 | 学期列表、指定教学周课表 | 2 |
+| 校园 App 课表 | 学期列表、指定教学周课表、最多 14 天自然日期范围 | 3 |
 | e站通 | 事项检索、办事指南、本人待办、申请状态与可用进度 | 4 |
 | 通用 | 能力、本地会话状态与设置入口信息 | 2 |
 
-**22 个工具中，20 个只读，2 个提交操作。** 报名与预约只有在用户明确选择目标并要求提交时才调用；结果未知时不自动重发。[查看全部工具与覆盖边界 →](docs/FEATURES.md)
+**23 个工具中，21 个只读，2 个提交操作。** 报名与预约只有在用户明确选择目标并要求提交时才调用；结果未知时不自动重发。[查看全部工具与覆盖边界 →](docs/FEATURES.md)
 
 ## 开始使用
 
@@ -58,11 +58,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File E:/CampusMCP/scripts/setup.p
 - 四个平台共用 CAS 凭据，各自保存业务会话；缺会话或明确失效时自动恢复。
 - 空闲教室与 e站通公开指南无需登录。
 - 空闲教室结果来自学校公开记录，不是现场空位、预约或准入证明；冲突、保留和未校验房间不会进入 `only_available`。
-- 校园卡余额另运行一次本人学号配置：
-
-```powershell
-& E:/CampusMCP/.venv/Scripts/upc-mcp.exe card-balance configure
-```
+- 校园卡余额自动使用设置页保存的学号，无需重复配置；更换账号后跟随新学号，移除账号后停止查询。余额接口不接收密码，也不需要 CAS 登录。
 
 以后双击 **打开本地设置.cmd** 即可管理账号。页面显示“已保存会话”只代表本地有记录；点击“检查连接”才在线核验。
 
@@ -89,7 +85,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File E:/CampusMCP/scripts/setup.p
 再用 upc-mcp mcp-config 生成真实配置，并合并到我当前客户端的 MCP 配置。
 保留其他 MCP 服务，设置页和 MCP 使用同一状态目录。
 启动 upc-mcp settings，让我在本机页面自行填写账号密码；不要让我把密码发到聊天。
-接入后检查 list_tools（预期 22 项）和 upc_capabilities。
+接入后检查 list_tools（预期 23 项）和 upc_capabilities。
 不要在安装测试中提交报名、预约、申请或签到。
 如果你没有修改客户端配置的权限，请给出准确配置和操作入口，不要声称已完成接入。
 ```
@@ -109,7 +105,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File E:/CampusMCP/scripts/setup.p
 ## 首版的明确边界
 
 - 学校可能要求验证码或二次验证；不承诺永久免交互。
-- 课表按周查询，没有整学期工具；e站通个人列表当前只覆盖第 1 页、已验证的状态筛选。
+- 课表按周查询；工作区新增最多 14 天的自然日期范围工具（Unreleased），没有整学期工具；e站通个人列表当前只覆盖第 1 页、已验证的状态筛选。
 - 学校未提供的学分要求、流程节点或进度保持未知。
 - 报名、预约提交已有代码与合成测试，**未通过真实提交作为发布验收**；安装和 CI 不会替用户提交。
 - 不提供校园卡流水、签到/补签、取消报名、自动抢座或 e站通代提交。
@@ -129,7 +125,7 @@ uv build
 | --- | --- |
 | [配置指南](docs/CONFIGURATION.md) | 安装、账号、MCP 接入、状态目录和排查 |
 | [Agent 配置](docs/AGENT_SETUP.md) | 可复制提示词、自动安装边界和验收 |
-| [功能范围](docs/FEATURES.md) | 22 工具与实际覆盖 |
+| [功能范围](docs/FEATURES.md) | 23 工具与实际覆盖 |
 | [架构](docs/ARCHITECTURE.md) | 模块、认证、会话与故障隔离 |
 | [隐私](docs/PRIVACY.md) | 凭据、AI 查询数据和发布内容 |
 | [更新日志](CHANGELOG.md) | 首版交付与已知限制 |

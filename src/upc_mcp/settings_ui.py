@@ -92,11 +92,14 @@ class SettingsApplication:
         if expected.configured and body.get("replace") is not True:
             raise SettingsError("already_configured", "已有账号，请使用更新账号操作。", 409)
         self.auto_auth.configure(username.strip(), password, expected=expected)
-        return {"status": "ok", "message": "账号已加密保存在本机，查询时会自动建立连接。"}
+        return {
+            "status": "ok",
+            "message": "账号已加密保存；余额查询自动使用该账号的学号，无需另行配置。",
+        }
 
     def clear(self, body: dict) -> dict:
         self.auto_auth.clear_credential(expected=self._expected(body))
-        return {"status": "ok", "message": "统一凭据已移除，余额配置和其他系统文件保留。"}
+        return {"status": "ok", "message": "统一凭据已移除，余额查询已停用；其他系统文件保留。"}
 
     def status(self) -> dict:
         # Imports/read failures in one business store stay within its own row.

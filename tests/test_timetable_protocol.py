@@ -4,6 +4,7 @@ import asyncio
 import copy
 import gzip
 import json
+from datetime import date
 from pathlib import Path
 
 import httpx
@@ -14,6 +15,7 @@ from upc_mcp.timetable_protocol import (
     TimetableClient,
     TimetableCookie,
     TimetableError,
+    TimetableMeeting,
     parse_index,
     parse_week,
 )
@@ -244,6 +246,46 @@ def test_cookie_scope_path_and_secure_boundaries():
 
 def run(coro):
     return asyncio.run(coro)
+
+
+def meeting(weekday: int, start: int, end: int) -> TimetableMeeting:
+    return TimetableMeeting(
+        course_name="同名课程",
+        weekday=weekday,
+        start_period=start,
+        end_period=end,
+        periods=(start, end),
+        source_periods=(start, end),
+        weeks=(8,),
+        week_label="8",
+        teacher="同一教师",
+        location="同一地点",
+        course_id="same-course",
+        week_type=None,
+        order=start,
+        total_length=2,
+        lessons="1-2",
+        course_time="08:00~09:35",
+        sections_source="lessArr",
+    )
+
+
+def test_same_course_name_on_different_days_or_times_gets_distinct_instance_ids():
+    sunday = meeting(7, 1, 2).public(date(2026, 10, 25))
+    monday = meeting(1, 1, 2).public(date(2026, 10, 26))
+    same_day_other_time = meeting(7, 3, 4).public(date(2026, 10, 25))
+    ids = {
+        sunday["instance_id"],
+        monday["instance_id"],
+        same_day_other_time["instance_id"],
+    }
+    assert len(ids) == 3
+    assert sunday["weekday_label"] == "周日"
+    assert sunday["teaching_day_index"] == 1
+    assert monday["weekday_label"] == "周一"
+    assert monday["teaching_day_index"] == 2
+    assert sunday["date"] == "2026-10-25"
+    assert monday["date"] == "2026-10-26"
 
 
 def test_client_sends_fixed_request_shape_and_cookie():

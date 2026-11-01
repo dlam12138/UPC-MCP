@@ -71,7 +71,7 @@
         <p class="section-description">共用学校账号，各自管理连接。</p>
         <div id="service-list" class="service-list" aria-live="polite"><p class="loading-placeholder">正在读取本地连接状态…</p></div>
         <div class="connection-note"><span class="small-label">关于连接状态</span><p>“已保存会话”表示本机有登录记录。点击“检查”才会访问对应学校服务并验证连接。</p></div>
-        <div class="anonymous-note"><span class="dot"></span><p>空闲教室、e站通公开指南无需登录。<br>校园卡余额使用独立的本人学号配置。</p></div>
+        <div class="anonymous-note"><span class="dot"></span><p>空闲教室、e站通公开指南无需登录。<br>校园卡余额自动使用此处保存的学号，无需另行配置，也不会向余额接口发送密码。</p></div>
       </section>
     </div>
 
@@ -83,7 +83,7 @@
   </main>
 
   <dialog id="clear-dialog" aria-labelledby="clear-title" aria-describedby="clear-description">
-    <div class="dialog-content"><span class="section-number">账号管理</span><h2 id="clear-title">移除统一凭据？</h2><p id="clear-description">会移除这台电脑保存的学校账号、密码和共同登录记录。余额配置保留；已绑定统一账号的服务需要重新配置账号后才能继续使用。</p><div class="dialog-actions"><button id="cancel-clear" class="secondary-button" type="button" autofocus>保留凭据</button><button id="confirm-clear" class="primary-button danger-button" type="button">确认移除</button></div></div>
+    <div class="dialog-content"><span class="section-number">账号管理</span><h2 id="clear-title">移除统一凭据？</h2><p id="clear-description">会移除这台电脑保存的学校账号、密码和共同登录记录。余额查询将停用，不会退回旧学号；已绑定统一账号的服务需要重新配置账号后才能继续使用。</p><div class="dialog-actions"><button id="cancel-clear" class="secondary-button" type="button" autofocus>保留凭据</button><button id="confirm-clear" class="primary-button danger-button" type="button">确认移除</button></div></div>
   </dialog>
 </body>
 </html>

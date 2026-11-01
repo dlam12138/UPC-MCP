@@ -7,6 +7,8 @@ implemented.  A missing or corrupt local session affects only this service.
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
+import re
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 from pathlib import Path
@@ -36,6 +38,10 @@ ACTIVE_STATES = {"stored", "unverified"}
 # other timetable request behind one global lock.  Four matches the other
 # independent read adapters and leaves headroom for a slow week plus terms.
 NETWORK_CONCURRENCY = 4
+MAX_RANGE_DAYS = 14
+MAX_RANGE_WEEKS = 3
+ISO_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}\Z")
+ISO_WEEKDAY_LABELS = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
 
 
 def now() -> str:
@@ -387,22 +393,152 @@ class TimetableService:
 
         index, selected, week_data = await self._run(operation)
         session = await asyncio.to_thread(self.store.load)
+        dates = week_data.dates
+        courses = [
+            meeting.public(_date_for_weekday(dates, meeting.weekday))
+            for meeting in week_data.meetings
+        ]
+        courses.sort(key=_course_sort_key)
         payload = self._base("empty" if week_data.empty else "ok")
         payload.update(
             {
                 "session": session.public() if session else None,
                 "term": selected.public(),
                 "week": week,
-                "weekdays": [day.isoformat() for day in week_data.dates],
-                "courses": [
-                    meeting.public(week_data.dates[meeting.weekday - 1])
-                    for meeting in week_data.meetings
-                ],
+                "week_start": dates[0].isoformat(),
+                "week_end": dates[-1].isoformat(),
+                "weekdays": [day.isoformat() for day in dates],
+                "courses": courses,
                 "counts": {
-                    "courses": len(week_data.meetings),
+                    "total": len(courses),
+                    "returned": len(courses),
+                    "courses": len(courses),
                     "unique_courses": _unique_courses(week_data.meetings),
-                    "periods": len({(m.start_period, m.end_period) for m in week_data.meetings}),
+                    "periods": len(
+                        {(m.start_period, m.end_period) for m in week_data.meetings}
+                    ),
+                    "complete": True,
                 },
+                "complete": True,
+                "calendar": _calendar_public(),
+                "current": _current_public(index),
+            }
+        )
+        return payload
+
+    async def range(
+        self,
+        year: str,
+        term: str,
+        start_date: str,
+        end_date: str,
+    ) -> dict:
+        """Read a bounded natural-date range across at most three teaching weeks."""
+        year = year.strip()
+        term = term.strip()
+        if not year or not term:
+            raise TimetableError("invalid_input", "year 和 term 必须是学期列表中的非空值。")
+        start = _parse_iso_date(start_date, "start_date")
+        end = _parse_iso_date(end_date, "end_date")
+        if start > end:
+            raise TimetableError("invalid_input", "start_date 不能晚于 end_date。")
+        span_days = (end - start).days + 1
+        if span_days > MAX_RANGE_DAYS:
+            raise TimetableError(
+                "invalid_input",
+                f"日期范围最多 {MAX_RANGE_DAYS} 天；未按整学期或无限范围取数。",
+            )
+
+        async def operation(
+            _session: TimetableSession, client: TimetableClient
+        ) -> tuple[
+            TimetableIndex,
+            TimetableTerm,
+            list[int],
+            list[TimetableWeek],
+        ]:
+            index = await client.get_index()
+            selected = index.find(year, term)
+            if selected is None:
+                raise TimetableError("invalid_input", "指定学年/学期不在学校返回的学期列表中。")
+            term_start = selected.startday
+            term_end = term_start + dt.timedelta(days=selected.total_weeks * 7 - 1)
+            if start < term_start or end > term_end:
+                raise TimetableError(
+                    "invalid_input",
+                    "日期范围超出该学期；未跨学期拼接或猜测。",
+                )
+            first_week = (start - term_start).days // 7 + 1
+            last_week = (end - term_start).days // 7 + 1
+            weeks = list(range(first_week, last_week + 1))
+            if len(weeks) > MAX_RANGE_WEEKS:
+                raise TimetableError(
+                    "invalid_input",
+                    f"日期范围最多覆盖 {MAX_RANGE_WEEKS} 个教学周。",
+                )
+            week_data = [await client.get_week(selected, week) for week in weeks]
+            return index, selected, weeks, week_data
+
+        index, selected, weeks, week_data = await self._run(operation)
+        session = await asyncio.to_thread(self.store.load)
+        courses = []
+        week_details = []
+        for week, data in zip(weeks, week_data, strict=True):
+            week_courses = 0
+            for meeting in data.meetings:
+                day = _date_for_weekday(data.dates, meeting.weekday)
+                if start <= day <= end:
+                    courses.append(meeting.public(day))
+                    week_courses += 1
+            week_details.append(
+                {
+                    "week": week,
+                    "start": data.dates[0].isoformat(),
+                    "end": data.dates[-1].isoformat(),
+                    "courses": week_courses,
+                }
+            )
+        courses.sort(key=_course_sort_key)
+        days = [
+            _day_public(start + dt.timedelta(days=offset))
+            for offset in range(span_days)
+        ]
+        payload = self._base("empty" if not courses else "ok")
+        payload.update(
+            {
+                "session": session.public() if session else None,
+                "term": selected.public(),
+                "range": {
+                    "start_date": start.isoformat(),
+                    "end_date": end.isoformat(),
+                    "days": span_days,
+                    "weeks": weeks,
+                    "week_details": week_details,
+                    "complete": True,
+                },
+                "weekdays": [day["date"] for day in days],
+                "days": days,
+                "courses": courses,
+                "counts": {
+                    "total": len(courses),
+                    "returned": len(courses),
+                    "courses": len(courses),
+                    "unique_courses": len(
+                        {
+                            (course.get("course_id"), course.get("course_name"))
+                            for course in courses
+                        }
+                    ),
+                    "periods": len(
+                        {
+                            (course["start_period"], course["end_period"])
+                            for course in courses
+                        }
+                    ),
+                    "complete": True,
+                },
+                "complete": True,
+                "calendar": _calendar_public(),
                 "current": _current_public(index),
             }
         )
@@ -529,3 +665,52 @@ def _unique_courses(meetings: tuple[TimetableMeeting, ...]) -> int:
         for meeting in meetings
     }
     return len(keys)
+
+
+def _date_for_weekday(dates: tuple[dt.date, ...], weekday: int) -> dt.date:
+    for day in dates:
+        if day.isoweekday() == weekday:
+            return day
+    raise TimetableError(
+        "schema_changed",
+        "课程 ISO weekday 与本周日期不一致；拒绝猜测日期。",
+    )
+
+
+def _parse_iso_date(value: str, name: str) -> dt.date:
+    if not isinstance(value, str) or not ISO_DATE.fullmatch(value.strip()):
+        raise TimetableError("invalid_input", f"{name} 必须是显式 YYYY-MM-DD。")
+    try:
+        return dt.date.fromisoformat(value.strip())
+    except ValueError:
+        raise TimetableError("invalid_input", f"{name} 不是有效公历日期。") from None
+
+
+def _course_sort_key(course: dict) -> tuple:
+    return (
+        course.get("date") or "",
+        course.get("start_period") or 0,
+        course.get("end_period") or 0,
+        course.get("course_name") or "",
+        course.get("location") or "",
+        course.get("teacher") or "",
+        course.get("instance_id") or "",
+    )
+
+
+def _calendar_public() -> dict:
+    return {
+        "week_starts_on": "sunday",
+        "weekday_numbering": "ISO-8601: Monday=1, Sunday=7",
+        "teaching_day_numbering": "Sunday=1, Monday=2, Saturday=7",
+        "date_source": "meeting ISO weekday matched to explicit weekdays dates",
+    }
+
+
+def _day_public(day: dt.date) -> dict:
+    return {
+        "date": day.isoformat(),
+        "weekday": day.isoweekday(),
+        "weekday_label": ISO_WEEKDAY_LABELS[day.isoweekday() - 1],
+        "teaching_day_index": day.isoweekday() % 7 + 1,
+    }

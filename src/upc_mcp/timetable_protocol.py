@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import hashlib
 import json
 import re
 import time
@@ -28,6 +29,7 @@ BASE_URL = "https://app.upc.edu.cn"
 PAGE_PATH = "/site/weekschedule/index"
 INDEX_PATH = "/timetable/wap/default/get-index"
 WEEK_PATH = "/timetable/wap/default/get-datatmp"
+ISO_WEEKDAY_LABELS = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
 WEEK_TYPE = "2"
 MAX_WEEKS = 30
 MAX_PERIOD = 14
@@ -215,9 +217,23 @@ class TimetableMeeting:
     exam_type: str | None = None
 
     def public(self, day: dt.date) -> dict:
+        instance_key = "|".join(
+            [
+                self.course_id or "",
+                self.course_name,
+                day.isoformat(),
+                f"{self.start_period}-{self.end_period}",
+                str(self.order if self.order is not None else ""),
+                self.teacher or "",
+                self.location or "",
+            ]
+        )
         return {
             "date": day.isoformat(),
             "weekday": self.weekday,
+            "weekday_label": ISO_WEEKDAY_LABELS[self.weekday - 1],
+            "teaching_day_index": day.isoweekday() % 7 + 1,
+            "instance_id": hashlib.sha256(instance_key.encode("utf-8")).hexdigest()[:16],
             "course_name": self.course_name,
             "teacher": self.teacher,
             "location": self.location,
@@ -233,6 +249,7 @@ class TimetableMeeting:
             "total_length": self.total_length,
             "lessons": self.lessons,
             "course_time": self.course_time,
+            "time_range": self.course_time,
             "sections_source": self.sections_source,
             "credit": self.credit,
             "course_type": self.course_type,

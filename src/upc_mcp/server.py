@@ -37,7 +37,9 @@ def result(payload: dict, error=False) -> CallToolResult:
 
 def create_server(directory: Path) -> MCPServer:
     auto_auth: AutoAuthCoordinator = create_auto_auth(directory)
-    card_balance_service = CardBalanceService(CardBalanceStore(directory))
+    card_balance_service = CardBalanceService(
+        CardBalanceStore(directory), credentials=auto_auth.credentials
+    )
     classroom_service = ClassroomService()
     shiguang_store = ShiguangStore(directory)
     shiguang_service = ShiguangService(shiguang_store, auto_auth=auto_auth)
@@ -138,6 +140,7 @@ def create_server(directory: Path) -> MCPServer:
                     "timetable": "implemented",
                     "timetable_terms": "implemented",
                     "timetable_week": "implemented",
+                    "timetable_range": "implemented",
                     "timetable_semester": "not_implemented",
                     "shiguang_activities": "implemented",
                     "shiguang_activity_detail": "implemented",
@@ -179,6 +182,7 @@ def create_server(directory: Path) -> MCPServer:
                     "upc_shiguang_report_card",
                     "upc_timetable_terms",
                     "upc_timetable_week",
+                    "upc_timetable_range",
                 ],
                 "write_tools": [
                     "upc_library_book",

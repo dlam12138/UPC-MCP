@@ -38,6 +38,7 @@ def test_real_stdio_discovery_and_structured_auth_error(tmp_path, mode):
                 "upc_shiguang_register_activity",
                 "upc_timetable_terms",
                 "upc_timetable_week",
+                "upc_timetable_range",
             }
             assert "upc_card_transactions" not in {t.name for t in tools}
             assert "upc_timetable_semester" not in {t.name for t in tools}
@@ -167,6 +168,21 @@ def test_real_stdio_discovery_and_structured_auth_error(tmp_path, mode):
                 "week",
             }
             assert timetable_week.input_schema["properties"]["week"]["minimum"] == 1
+            timetable_range = next(t for t in tools if t.name == "upc_timetable_range")
+            assert timetable_range.annotations.read_only_hint is True
+            assert set(timetable_range.input_schema["properties"]) == {
+                "year",
+                "term",
+                "start_date",
+                "end_date",
+                "session_ref",
+            }
+            assert set(timetable_range.input_schema["required"]) == {
+                "year",
+                "term",
+                "start_date",
+                "end_date",
+            }
             timetable_schema = json.dumps(
                 timetable_week.input_schema, ensure_ascii=False
             ).lower()
@@ -182,6 +198,20 @@ def test_real_stdio_discovery_and_structured_auth_error(tmp_path, mode):
             )
             assert timetable_week_error.is_error
             assert timetable_week_error.structured_content["status"] == "auth_required"
+            timetable_range_error = await client.call_tool(
+                "upc_timetable_range",
+                {
+                    "year": "2026-2027",
+                    "term": "1",
+                    "start_date": "2026-11-08",
+                    "end_date": "2026-11-14",
+                },
+            )
+            assert timetable_range_error.is_error
+            assert (
+                timetable_range_error.structured_content["status"]
+                == "auth_required"
+            )
             assert json.loads(timetable_week_error.content[0].text) == (
                 timetable_week_error.structured_content
             )
@@ -385,7 +415,7 @@ def test_stdio_lists_tools_with_corrupt_timetable_session(tmp_path):
         )
         async with Client(launch, mode="auto") as client:
             tools = (await client.list_tools()).tools
-            assert len(tools) == 22
+            assert len(tools) == 23
             assert "upc_timetable_terms" in {t.name for t in tools}
             status = await client.call_tool(
                 "upc_session_status", {"system": "timetable"}
