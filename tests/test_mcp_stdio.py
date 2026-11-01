@@ -59,7 +59,10 @@ def test_real_stdio_discovery_and_structured_auth_error(tmp_path, mode):
                 "date",
                 "periods",
                 "building",
+                "buildings",
+                "mode",
                 "only_available",
+                "include_conflicts",
                 "offset",
                 "limit",
             }

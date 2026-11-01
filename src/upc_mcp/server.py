@@ -112,6 +112,17 @@ def create_server(directory: Path) -> MCPServer:
                 "capabilities": {
                     "card_transactions": "retired",
                     "classrooms": "implemented",
+                    "classrooms_scope_modes": ["auto", "overview", "full"],
+                    "classrooms_overview": "implemented",
+                    "classrooms_full_verification": "implemented",
+                    "classrooms_conflicts": "candidates_only",
+                    "classrooms_supported_periods": [1, 12],
+                    "classrooms_period_13": "unsupported",
+                    "classrooms_availability_certainty": [
+                        "records_verified",
+                        "partial",
+                        "unverified",
+                    ],
                     "card_balance_tool": "implemented",
                     "power": "not_implemented",
                     "library": "implemented",
@@ -319,35 +330,87 @@ def create_server(directory: Path) -> MCPServer:
         date: Annotated[str, Field(description="查询日期，显式 YYYY-MM-DD。")],
         periods: Annotated[
             list[int],
-            Field(description="节次 1–13，至少一节；重复值会去重并按升序提交。"),
+            Field(
+                description=(
+                    "节次 1–12，至少一节；重复值会去重并按升序提交。"
+                    "第 13 节未验证，传入会返回 unsupported_period。"
+                )
+            ),
         ],
         building: Annotated[
             str,
-            Field(description="“全部”或学校返回的 building_options[].id。"),
+            Field(description="“全部”或学校返回的 building_options[].id；省略 buildings 时使用。"),
         ] = "全部",
+        buildings: Annotated[
+            list[str] | None,
+            Field(
+                min_length=1,
+                max_length=2,
+                description="可选；1–2 个 building_options[].id。指定后走 full 逐间校验。",
+            ),
+        ] = None,
+        mode: Annotated[
+            Literal["auto", "overview", "full"],
+            Field(
+                description=(
+                    "auto：全部范围返回按楼概览，1–2 栋走 full；"
+                    "overview：只返回按楼汇总，不查 detail；"
+                    "full：对所选范围（含“全部”）逐间 detail 校验。"
+                )
+            ),
+        ] = "auto",
         only_available: Annotated[
             bool,
-            Field(description="true 只返回空闲教室；false 返回全部并标注 occupied。"),
+            Field(
+                description=(
+                    "true 只返回 available（search-all 与 detail 均未显示占用）的教室；"
+                    "conflict、reserved、unknown 均不返回。"
+                )
+            ),
+        ] = False,
+        include_conflicts: Annotated[
+            bool,
+            Field(
+                description=(
+                    "已弃用，仅为兼容旧调用保留。true 也不会把冲突房间升级为 available；"
+                    "冲突只作为 conflict_candidates 展示，仍为 uncertain。"
+                )
+            ),
         ] = False,
         offset: Annotated[int, Field(description="房间结果偏移，默认 0。")] = 0,
         limit: Annotated[int, Field(description="本次最多返回 1–500 间，默认 200。")] = 200,
     ) -> CallToolResult:
-        """Query public free classrooms for one campus/date/building/period set.
+        """Query public classroom records with an explicit verification scope.
 
-        Anonymous read-only POST to one fixed school endpoint. No account,
-        Cookie, URL, header, or arbitrary building endpoint is accepted. The
-        school returns one aggregate occupancy set for the selected periods;
-        per-period state is not reconstructed. Results are paginated with
-        explicit totals and truncation.
+        Anonymous read-only requests to fixed school endpoints. No account,
+        Cookie, URL, header, or arbitrary endpoint is accepted.
+
+        ``mode=auto`` returns a per-building overview when the scope is
+        "全部"; a 1–2 building scope is checked room by room through the
+        official detail endpoint. ``mode=full`` also supports "全部", but that
+        is a deliberately heavy explicit request. Overview ``candidates`` are
+        only search-all candidates, not free rooms.
+
+        ``available`` means both school records show no occupancy for the
+        selected periods; it is not proof of a live empty seat, reservation,
+        or admission. ``availability_certainty`` and ``request_complete``
+        separate record completeness from availability certainty.
+
+        If the user already named one or two buildings, query them directly;
+        do not ask again. Only an all-building request should start with the
+        overview and a narrowing question.
         """
         try:
             return result(
-                await classroom_service.query(
+                await classroom_service.query_scope(
                     campus=campus,
                     date=date,
                     periods=periods,
                     building=building,
+                    buildings=buildings,
+                    mode=mode,
                     only_available=only_available,
+                    include_conflicts=include_conflicts,
                     offset=offset,
                     limit=limit,
                 )

@@ -25,21 +25,42 @@ refresh, or school request at import/startup time is implemented.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import ssl
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import date as Date
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlencode
 
 import httpx
 
 ENDPOINT = "https://app.upc.edu.cn/freeclass/wap/default/search-all"
+DETAIL_ENDPOINT = "https://app.upc.edu.cn/freeclass/wap/default/detail"
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 MAX_CONCURRENCY = 4
+DETAIL_CONCURRENCY = 4
+DETAIL_DEADLINE_SECONDS = 30.0
+MAX_DETAIL_REQUESTS = 300
+DETAIL_STOP_CODES = frozenset(
+    {
+        "rate_limited",
+        "access_denied",
+        "network_error",
+        "tls_error",
+        "timeout",
+        "redirect",
+    }
+)
+RESERVED_NAME_MARKERS = ("研究生专用", "教师专用", "专用教室")
+
+
+def is_reserved_name(name: str) -> bool:
+    return any(marker in name for marker in RESERVED_NAME_MARKERS)
 CONNECT_TIMEOUT_SECONDS = 10.0
 READ_TIMEOUT_SECONDS = 15.0
 DEFAULT_ROOM_LIMIT = 200
@@ -67,7 +88,7 @@ CAMPUS_ALIASES = {
 PERIOD_GROUPS = {
     "上午": (1, 2, 3, 4, 5),
     "下午": (6, 7, 8, 9),
-    "晚上": (10, 11, 12, 13),
+    "晚上": (10, 11, 12),
 }
 DATE_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}\Z")
 INTEGER_RE = re.compile(r"-?[0-9]+\Z")
@@ -143,20 +164,36 @@ def _normalize_periods(value: object) -> tuple[int, ...]:
     ):
         raise ClassroomError(
             "invalid_periods",
-            "节次必须是 1–13 的整数数组，且至少选择一节。",
+            "节次必须是 1–12 的整数数组，且至少选择一节；第 13 节尚未验证。",
         )
     periods: set[int] = set()
     for item in value:
-        if isinstance(item, bool) or not isinstance(item, int) or not 1 <= item <= 13:
+        if isinstance(item, bool) or not isinstance(item, int):
             raise ClassroomError(
                 "invalid_periods",
-                "节次必须是 1–13 的整数，且至少选择一节。",
+                "节次必须是 1–12 的整数，且至少选择一节；第 13 节尚未验证。",
+            )
+        if item == 13:
+            raise ClassroomError(
+                "unsupported_period",
+                "第 13 节尚未验证：search-all 返回全占用，detail 没有 c_13 数据；"
+                "本工具不把它当作可用，也不猜成 1–12。",
+                details={
+                    "period": 13,
+                    "supported_periods": [1, 12],
+                    "reason": "detail_c13_empty",
+                },
+            )
+        if not 1 <= item <= 12:
+            raise ClassroomError(
+                "invalid_periods",
+                "节次必须是 1–12 的整数，且至少选择一节；第 13 节尚未验证。",
             )
         periods.add(item)
     if not periods:
         raise ClassroomError(
             "invalid_periods",
-            "节次必须是 1–13 的整数，且至少选择一节。",
+            "节次必须是 1–12 的整数，且至少选择一节；第 13 节尚未验证。",
         )
     return tuple(sorted(periods))
 
@@ -233,15 +270,114 @@ class ClassroomRoom:
     campus: str
     capacity: int | None
     occupied: bool
+    occupancy_source: Literal[
+        "search_all", "detail", "unknown", "conflict", "reserved"
+    ] = "search_all"
+    occupancy_unknown: bool = False
+    search_all_conflict: bool = False
 
     def public(self) -> dict[str, Any]:
+        if self.occupied:
+            availability = "occupied"
+        elif self.search_all_conflict:
+            availability = (
+                "reserved" if is_reserved_name(self.name) else "conflict"
+            )
+        elif self.occupancy_unknown:
+            availability = "unknown"
+        else:
+            availability = "available"
         return {
             "code": self.code,
             "name": self.name,
             "building": self.building,
             "campus": self.campus,
             "capacity": self.capacity,
-            "occupied": self.occupied,
+            "occupied": None if self.occupancy_unknown else self.occupied,
+            "availability": availability,
+            "occupancy_source": self.occupancy_source,
+            "occupancy_unknown": self.occupancy_unknown,
+            "search_all_conflict": self.search_all_conflict,
+            "reserved": is_reserved_name(self.name),
+        }
+
+
+@dataclass(frozen=True)
+class RoomDetail:
+    """One room's per-period occupancy from the official detail endpoint."""
+
+    code: str
+    date: Date
+    occupied_periods: frozenset[int]
+
+
+@dataclass(frozen=True)
+class DetailLookup:
+    """A detail lookup result; ``None`` periods mean the room is unverified."""
+
+    code: str
+    occupied_periods: frozenset[int] | None
+    error: str | None = None
+    http_status: int | None = None
+
+    @property
+    def verified(self) -> bool:
+        return self.occupied_periods is not None
+
+
+@dataclass(frozen=True)
+class ClassroomVerification:
+    search_all_occupied: int = 0
+    detail_checked: int = 0
+    detail_occupied: int = 0
+    detail_failed: int = 0
+    unknown: int = 0
+    conflicts: int = 0
+    reserved: int = 0
+    unqueried: int = 0
+    timed_out: int = 0
+    checked_all_rooms: bool = True
+
+    @property
+    def request_complete(self) -> bool:
+        """Whether every planned school request completed without failure.
+
+        This is deliberately separate from availability certainty: a conflict
+        or a reserved room can be fully observed and still not be safely
+        usable.
+        """
+        return self.detail_failed == 0 and self.unqueried == 0
+
+    @property
+    def complete(self) -> bool:
+        """Deprecated alias for :attr:`request_complete`."""
+        return self.request_complete
+
+    @property
+    def availability_certainty(self) -> str:
+        if not self.request_complete:
+            return "partial"
+        if not self.checked_all_rooms:
+            return "partial"
+        if self.unknown == 0 and self.conflicts == 0 and self.reserved == 0:
+            return "records_verified"
+        return "partial"
+
+    def public(self) -> dict[str, Any]:
+        return {
+            "search_all_occupied": self.search_all_occupied,
+            "detail_checked": self.detail_checked,
+            "detail_occupied": self.detail_occupied,
+            "detail_failed": self.detail_failed,
+            "unknown": self.unknown,
+            "conflicts": self.conflicts,
+            "reserved": self.reserved,
+            "unqueried": self.unqueried,
+            "timed_out": self.timed_out,
+            "checked_all_rooms": self.checked_all_rooms,
+            "request_complete": self.request_complete,
+            "availability_certainty": self.availability_certainty,
+            "complete": self.complete,
         }
 
 
@@ -266,6 +402,13 @@ def build_form(query: ClassroomQuery) -> str:
     ]
     fields.extend(("jc[]", str(period)) for period in query.periods)
     return urlencode(fields, encoding="utf-8", errors="strict")
+
+
+def build_detail_form(code: str, day: Date) -> str:
+    """Build the official per-room detail form for one date."""
+    return urlencode(
+        [("code", code), ("date", day.isoformat())], encoding="utf-8", errors="strict"
+    )
 
 
 def _reject_constant(_value: str) -> None:
@@ -448,6 +591,85 @@ def parse_response(body: bytes | str, query: ClassroomQuery) -> ClassroomDirecto
     return ClassroomDirectory(rooms=rooms, building_options=building_options)
 
 
+def parse_detail(body: bytes | str, query: ClassroomQuery, code: str) -> RoomDetail:
+    """Parse one official room-detail response into the periods it occupies.
+
+    The page's ``kclist`` is keyed by weekday (1–7) in the same order as
+    ``weekdays``.  A multi-period block is stored only on its starting period
+    (for example ``c_10.lessArr == [10, 11, 12]``; ``c_11``/``c_12`` are
+    empty), so callers must inspect ``lessArr`` rather than ``c_<period>``.
+    """
+    root = _load_json(body)
+    if not isinstance(root, dict):
+        raise _invalid("学校返回的教室详情结构已变化。")
+    if "e" not in root:
+        raise _invalid("学校返回的教室详情缺少业务状态。")
+    status = _integer_field(root["e"], "e")
+    if status != 0:
+        message = _optional_message(root.get("m")) or "学校教室详情返回业务错误。"
+        raise ClassroomError(
+            "business_error",
+            "学校教室详情未返回有效结果，请稍后重试。",
+            details={"upstream_code": status, "upstream_message": message},
+        )
+    data = root.get("d")
+    if not isinstance(data, dict):
+        raise _invalid("学校返回的教室详情缺少数据对象。")
+    weekdays = data.get("weekdays")
+    if not isinstance(weekdays, list) or not weekdays:
+        raise _invalid("学校返回的教室详情缺少周日期。")
+    target = query.date.isoformat()
+    index = None
+    for position, value in enumerate(weekdays):
+        if not isinstance(value, str):
+            raise _invalid("学校返回的教室详情周日期格式已变化。")
+        if value == target:
+            index = position
+            break
+    if index is None:
+        raise ClassroomError(
+            "detail_date_missing",
+            "学校教室详情未包含查询日期；未采信该房间为空闲。",
+        )
+    kclist = data.get("kclist")
+    if not isinstance(kclist, dict):
+        raise _invalid("学校返回的教室详情缺少课表。")
+    day = kclist.get(str(index + 1))
+    if not isinstance(day, dict):
+        raise _invalid("学校返回的教室详情缺少对应星期的课表。")
+    periods: set[int] = set()
+    saw_period_key = False
+    for key, block in day.items():
+        if (
+            not isinstance(key, str)
+            or not key.startswith("c_")
+            or not key[2:].isdigit()
+        ):
+            if block not in (None, [], {}):
+                raise _invalid("学校返回的教室详情课块键已变化。")
+            continue
+        saw_period_key = True
+        number = int(key[2:])
+        if not 1 <= number <= 13:
+            raise _invalid("学校返回的教室详情课块节次超出 1–13。")
+        if block is None or block == [] or block == {}:
+            continue
+        if not isinstance(block, dict):
+            raise _invalid("学校返回的教室详情课块结构已变化。")
+        less = block.get("lessArr")
+        if not isinstance(less, list) or not less:
+            raise _invalid("学校返回的教室详情课块缺少 lessArr。")
+        for period in less:
+            if isinstance(period, bool) or not isinstance(period, int):
+                raise _invalid("学校返回的教室详情节次类型已变化。")
+            if not 1 <= period <= 13:
+                raise _invalid("学校返回的教室详情节次超出 1–13。")
+            periods.add(period)
+    if not saw_period_key:
+        raise _invalid("学校返回的教室详情缺少 c_* 课块字段。")
+    return RoomDetail(code=code, date=query.date, occupied_periods=frozenset(periods))
+
+
 def _is_tls_error(error: BaseException) -> bool:
     seen: set[int] = set()
     current: BaseException | None = error
@@ -462,8 +684,17 @@ def _is_tls_error(error: BaseException) -> bool:
     return False
 
 
+@asynccontextmanager
+async def _optional_gate(gate: asyncio.Semaphore | None):
+    if gate is None:
+        yield
+    else:
+        async with gate:
+            yield
+
+
 class FreeClassroomClient:
-    """HTTP adapter for the one fixed anonymous classroom endpoint."""
+    """HTTP adapter for the two fixed anonymous classroom endpoints."""
 
     def __init__(
         self,
@@ -473,74 +704,67 @@ class FreeClassroomClient:
         self.transport = transport
         self.timeout = timeout or REQUEST_TIMEOUT
 
-    async def fetch(self, query: ClassroomQuery) -> ClassroomDirectory:
-        form = build_form(query)
+    async def _post(
+        self,
+        client: httpx.AsyncClient,
+        url: str,
+        form: str,
+        *,
+        limit: int = MAX_RESPONSE_BYTES,
+    ) -> bytes:
         try:
-            async with httpx.AsyncClient(
-                transport=self.transport,
-                trust_env=False,
-                follow_redirects=False,
-                timeout=self.timeout,
-                limits=httpx.Limits(
-                    max_connections=MAX_CONCURRENCY,
-                    max_keepalive_connections=0,
-                ),
-            ) as client:
-                async with client.stream(
-                    "POST",
-                    ENDPOINT,
-                    content=form.encode("utf-8"),
-                    headers=REQUEST_HEADERS,
-                ) as response:
-                    status = response.status_code
-                    if 300 <= status < 400:
+            async with client.stream(
+                "POST",
+                url,
+                content=form.encode("utf-8"),
+                headers=REQUEST_HEADERS,
+            ) as response:
+                status = response.status_code
+                if 300 <= status < 400:
+                    raise ClassroomError(
+                        "redirect",
+                        "学校教室服务要求跳转，当前不跟随重定向。",
+                        details={"http_status": status},
+                    )
+                if status in (401, 403):
+                    raise ClassroomError(
+                        "access_denied",
+                        "学校教室服务拒绝了匿名请求，未继续重试。",
+                        details={"http_status": status},
+                    )
+                if status == 429:
+                    raise ClassroomError(
+                        "rate_limited",
+                        "学校教室服务暂时限流，未继续重试。",
+                        details={"http_status": status},
+                    )
+                if status != 200:
+                    raise ClassroomError(
+                        "upstream_error",
+                        f"学校教室服务返回 HTTP {status}。",
+                        details={"http_status": status},
+                    )
+
+                declared = response.headers.get("content-length")
+                if declared is not None:
+                    try:
+                        declared_size = int(declared)
+                    except ValueError:
+                        declared_size = None
+                    if declared_size is not None and declared_size > limit:
                         raise ClassroomError(
-                            "redirect",
-                            "学校教室服务要求跳转，当前不跟随重定向。",
-                            details={"http_status": status},
-                        )
-                    if status in (401, 403):
-                        raise ClassroomError(
-                            "access_denied",
-                            "学校教室服务拒绝了匿名请求，未继续重试。",
-                            details={"http_status": status},
-                        )
-                    if status == 429:
-                        raise ClassroomError(
-                            "rate_limited",
-                            "学校教室服务暂时限流，未继续重试。",
-                            details={"http_status": status},
-                        )
-                    if status != 200:
-                        raise ClassroomError(
-                            "upstream_error",
-                            f"学校教室服务返回 HTTP {status}。",
-                            details={"http_status": status},
+                            "response_too_large",
+                            "学校教室响应超过本工具 2 MiB 上限。",
                         )
 
-                    declared = response.headers.get("content-length")
-                    if declared is not None:
-                        try:
-                            declared_size = int(declared)
-                        except ValueError:
-                            declared_size = None
-                        if (
-                            declared_size is not None
-                            and declared_size > MAX_RESPONSE_BYTES
-                        ):
-                            raise ClassroomError(
-                                "response_too_large",
-                                "学校教室响应超过本工具 2 MiB 上限。",
-                            )
-
-                    body = bytearray()
-                    async for chunk in response.aiter_bytes():
-                        if len(body) + len(chunk) > MAX_RESPONSE_BYTES:
-                            raise ClassroomError(
-                                "response_too_large",
-                                "学校教室响应超过本工具 2 MiB 上限。",
-                            )
-                        body.extend(chunk)
+                body = bytearray()
+                async for chunk in response.aiter_bytes():
+                    if len(body) + len(chunk) > limit:
+                        raise ClassroomError(
+                            "response_too_large",
+                            "学校教室响应超过本工具 2 MiB 上限。",
+                        )
+                    body.extend(chunk)
         except ClassroomError:
             raise
         except httpx.TimeoutException:
@@ -558,6 +782,135 @@ class FreeClassroomClient:
                 "network_error",
                 "无法连接学校教室服务，请检查网络后重试。",
             ) from None
+        return bytes(body)
 
-        return parse_response(bytes(body), query)
+    async def fetch(
+        self,
+        query: ClassroomQuery,
+        *,
+        gate: asyncio.Semaphore | None = None,
+    ) -> ClassroomDirectory:
+        form = build_form(query)
+        async with httpx.AsyncClient(
+            transport=self.transport,
+            trust_env=False,
+            follow_redirects=False,
+            timeout=self.timeout,
+            limits=httpx.Limits(
+                max_connections=MAX_CONCURRENCY,
+                max_keepalive_connections=0,
+            ),
+        ) as client:
+            async with _optional_gate(gate):
+                body = await self._post(client, ENDPOINT, form)
+        return parse_response(body, query)
+
+    async def fetch_details(
+        self,
+        query: ClassroomQuery,
+        codes: Sequence[str],
+        *,
+        concurrency: int = DETAIL_CONCURRENCY,
+        deadline: float = DETAIL_DEADLINE_SECONDS,
+        gate: asyncio.Semaphore | None = None,
+    ) -> dict[str, DetailLookup]:
+        """Verify candidate rooms through the official per-room detail endpoint.
+
+        Individual failures are returned as unverified lookups; they must never
+        be interpreted as free.  Every request is issued by this one client and
+        is bounded by ``concurrency`` and the overall ``deadline``.
+        """
+        unique = list(dict.fromkeys(codes))
+        if not unique:
+            return {}
+        if len(unique) > MAX_DETAIL_REQUESTS:
+            raise ClassroomError(
+                "too_many_details",
+                "候选教室数量超过本地逐间校验上限；未返回未校验的空闲结论。",
+                details={"candidates": len(unique), "limit": MAX_DETAIL_REQUESTS},
+            )
+        if (
+            isinstance(concurrency, bool)
+            or not isinstance(concurrency, int)
+            or not 1 <= concurrency <= 8
+        ):
+            concurrency = DETAIL_CONCURRENCY
+        if (
+            isinstance(deadline, bool)
+            or not isinstance(deadline, (int, float))
+            or not deadline > 0
+        ):
+            deadline = DETAIL_DEADLINE_SECONDS
+
+        stop = asyncio.Event()
+        semaphore = asyncio.Semaphore(concurrency)
+        results: dict[str, DetailLookup] = {}
+
+        async def one(code: str) -> DetailLookup:
+            if stop.is_set():
+                return DetailLookup(code, None, "detail_skipped")
+            async with semaphore:
+                if stop.is_set():
+                    return DetailLookup(code, None, "detail_skipped")
+                try:
+                    async with _optional_gate(gate):
+                        if stop.is_set():
+                            return DetailLookup(code, None, "detail_skipped")
+                        body = await self._post(
+                            client,
+                            DETAIL_ENDPOINT,
+                            build_detail_form(code, query.date),
+                        )
+                    detail = parse_detail(body, query, code)
+                    return DetailLookup(code, detail.occupied_periods)
+                except ClassroomError as error:
+                    if error.code in DETAIL_STOP_CODES:
+                        stop.set()
+                    status = error.details.get("http_status")
+                    return DetailLookup(
+                        code,
+                        None,
+                        error.code,
+                        status if isinstance(status, int) else None,
+                    )
+                except Exception:
+                    return DetailLookup(code, None, "detail_error")
+
+        async with httpx.AsyncClient(
+            transport=self.transport,
+            trust_env=False,
+            follow_redirects=False,
+            timeout=self.timeout,
+            limits=httpx.Limits(
+                max_connections=concurrency,
+                max_keepalive_connections=concurrency,
+            ),
+        ) as client:
+            tasks = {asyncio.create_task(one(code)): code for code in unique}
+            try:
+                done, pending = await asyncio.wait(tasks, timeout=deadline)
+                for task in done:
+                    try:
+                        lookup = task.result()
+                    except Exception:
+                        lookup = DetailLookup(tasks[task], None, "detail_error")
+                    results[lookup.code] = lookup
+                for task in pending:
+                    code = tasks[task]
+                    task.cancel()
+                    results[code] = DetailLookup(code, None, "detail_timeout")
+                if pending:
+                    await asyncio.gather(*pending, return_exceptions=True)
+            finally:
+                # Cancellation of the parent must not leave HTTP tasks running
+                # or let a later query inherit them.  Cancel and drain every
+                # child before the owning AsyncClient closes.
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+        for code in unique:
+            results.setdefault(code, DetailLookup(code, None, "detail_error"))
+        return results
 

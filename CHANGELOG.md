@@ -1,5 +1,95 @@
 # Changelog
 
+## Unreleased
+
+These changes are workspace-only. `v0.1.0` remains the published release and
+the consumer continues to pin that artifact; no tag, release asset, or
+consumer version is changed here.
+
+### Added
+
+- Free classrooms expose an explicit scope: `mode=auto|overview|full`,
+  `buildings=[1–2 ids]`, and per-room `availability`. `overview` returns
+  per-building totals and candidates from one `search-all`, without returning
+  a room-level free list. `full` checks every room in the selected scope
+  through the official `detail` endpoint; `building="全部"` is accepted as a
+  deliberately heavy explicit request.
+- `availability_certainty` (`records_verified`, `partial`, `unverified`),
+  `request_complete`, `request_budget`, and `evidence` make record coverage
+  and availability certainty explicit. `candidates`/`candidate_count` are not
+  free rooms.
+- `full` emits `conflict_candidates` for rooms where `search-all` says
+  occupied but `detail` shows no occupancy. These rooms remain
+  `occupancy_unknown=true` with `availability=conflict` (or `reserved`) and
+  are never returned by `only_available`.
+- `upc_capabilities` reports scope modes, supported periods, and the
+  availability-certainty vocabulary.
+
+### Changed
+
+- `upc_free_classrooms` with no scope (`building="全部"`) now defaults to a
+  per-building overview instead of a campus-wide room list. Callers that need
+  room-level records should select 1–2 buildings or explicitly use
+  `mode=full`.
+- `verification.complete` is now a deprecated alias for
+  `request_complete`. It describes request completion, not availability
+  certainty; use `availability_certainty` and per-room `availability`.
+- Per-room output adds `availability` (`available`, `occupied`, `unknown`,
+  `conflict`, `reserved`); `occupied` is `null` when the room is uncertain, so
+  a conflict cannot be read as `occupied=false`. `only_available` never
+  returns it.
+- `include_conflicts` is deprecated. It no longer upgrades conflicts to
+  available; conflicts are only exposed through `conflict_candidates`.
+
+### Fixed
+
+- Free classrooms: `search-all`'s `d.js` is not a reliable union. In tested
+  samples, multiple periods behaved as an intersection and `d.js` omitted
+  temporary "借用" records, so a room occupied in only some selected periods
+  could be reported free. The tool now treats `d.js` only as a conservative
+  pre-filter and checks the remaining candidates through the official
+  per-room `detail` endpoint, using each block's `lessArr`. This is a tested
+  sample conclusion, not a claim about the school's general server
+  implementation. Detail failures/timeouts/rate limits mark the room unknown;
+  if every planned detail request fails, the query returns
+  `availability_unverified`. Fixes the 2026-11-01 卓越 B233 false-free report.
+- Period 13 is now rejected with `unsupported_period` instead of returning a
+  warning and potentially treating empty `c_13` as available. Mixed queries
+  containing 13 are rejected as well; the tool does not guess a 1–12 rule.
+- `fetch_details` now cancels and drains all child tasks in a `finally` block
+  when the parent call is cancelled, so no orphan HTTP task survives into a
+  later query.
+
+### Known limits
+
+- `available` means both school records show no occupancy for the selected
+  periods. It is not proof of a live empty seat, reservation, or admission.
+- The `d.js` intersection semantics are based on tested samples, not a
+  documented server contract.
+- Conflict and reserved rooms are uncertain, not available. The name-marker
+  rule (`研究生专用`, `教师专用`, `专用教室`) is only a known-limit hint, not
+  complete admission classification.
+- Per-room checks are bounded to 4 concurrent requests, 60 seconds for full
+  mode, 300 detail slots, and 303 total planned requests per scope. Partial
+  results report `detail_unqueried` and `availability_certainty=partial`.
+- The legacy candidate path still exists for internal compatibility; the
+  public MCP tool uses the shared full/overview path.
+
+### Migration from the published v0.1.0 behavior
+
+- If a caller relied on `building="全部"` returning rooms, it now receives
+  `status="overview"`, `rooms=[]`, and `next_action="choose_buildings"`.
+  Pass `buildings=[...]` or `mode="full"` for room-level records.
+- If a caller read `verification.complete` as "availability is certain", use
+  `availability_certainty` and per-room `availability` instead.
+- If a caller passed `include_conflicts=true` expecting conflict rooms in
+  `available`, they are no longer upgraded; read `conflict_candidates` and
+  verify on site.
+- If a caller used `occupied=false` to infer availability, also read
+  `availability`; uncertain rooms now return `occupied=null`.
+- Period 13 calls now fail with `unsupported_period` instead of returning a
+  warning.
+
 ## 0.1.0 — 2026-11-01
 
 First public release for Windows and Python 3.12+.

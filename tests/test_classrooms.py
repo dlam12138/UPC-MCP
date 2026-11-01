@@ -11,7 +11,9 @@ import gzip
 import json
 import subprocess
 import sys
-from urllib.parse import parse_qsl
+from datetime import date as Date
+from datetime import timedelta
+from urllib.parse import parse_qsl, urlencode
 
 import httpx
 import pytest
@@ -20,12 +22,15 @@ from mcp import Client
 from upc_mcp.card_balance_service import CardBalanceService
 from upc_mcp.classroom_service import ClassroomService
 from upc_mcp.classrooms import (
+    DETAIL_ENDPOINT,
     ENDPOINT,
     MAX_RESPONSE_BYTES,
     ClassroomError,
     ClassroomQuery,
     FreeClassroomClient,
+    build_detail_form,
     build_form,
+    parse_detail,
     parse_response,
 )
 from upc_mcp.server import create_server
@@ -36,6 +41,11 @@ OTHER_CAMPUS = "古镇口校区"
 DATE = "2026-10-30"
 BUILDING = "东廊"
 OTHER_BUILDING = "南教楼"
+SCOPE_OPTIONS = [
+    {"id": "全部", "name": "全部"},
+    {"id": BUILDING, "name": BUILDING},
+    {"id": OTHER_BUILDING, "name": OTHER_BUILDING},
+]
 
 
 def room(
@@ -78,11 +88,102 @@ def payload(
     return {"e": e, "m": message, "d": {"all": all_groups, "js": js_groups, "listLh": buildings}}
 
 
-def json_handler(body: object, status: int = 200, headers: dict | None = None):
+def detail_payload(
+    *,
+    date: str = DATE,
+    blocks: dict[int, list[dict]] | None = None,
+    e: object = 0,
+    message: str = "操作成功",
+) -> dict:
+    """Synthetic room-detail response; all values are fabricated.
+
+    ``blocks`` maps a weekday index (1–7) to entries such as
+    ``{"period": 10, "lessArr": [10, 11, 12], "name": "借用"}``.
+    """
+    start = Date.fromisoformat(date)
+    kclist = {
+        str(day): {f"c_{period}": [] for period in range(1, 14)}
+        for day in range(1, 8)
+    }
+    for day, entries in (blocks or {}).items():
+        for entry in entries:
+            period = entry["period"]
+            less = entry["lessArr"]
+            kclist[str(day)][f"c_{period}"] = {
+                "name": entry.get("name", "借用"),
+                "order": period,
+                "lessArr": less,
+                "totalLength": len(less),
+            }
+    return {
+        "e": e,
+        "m": message,
+        "d": {
+            "kclist": kclist,
+            "weekdays": [
+                (start + timedelta(days=offset)).isoformat() for offset in range(7)
+            ],
+            "dateInfo": {"name": "synthetic", "date": date},
+            "temInfo": [],
+            "term": {},
+        },
+    }
+
+
+def detail_request(request: httpx.Request) -> tuple[str, str]:
+    form = dict(parse_qsl(request.content.decode("utf-8")))
+    return form.get("code", ""), form.get("date", DATE)
+
+
+def json_handler(
+    body: object,
+    status: int = 200,
+    headers: dict | None = None,
+    details: object = None,
+):
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/detail"):
+            code, date = detail_request(request)
+            if callable(details):
+                return details(code, date, request)
+            if isinstance(details, dict) and code in details:
+                value = details[code]
+                if isinstance(value, httpx.Response):
+                    return value
+                return httpx.Response(200, json=value)
+            if status != 200:
+                return httpx.Response(status, json=body, headers=headers)
+            return httpx.Response(200, json=detail_payload(date=date))
         return httpx.Response(status, json=body, headers=headers)
 
     return handler
+
+
+def scope_handler(bodies: dict[str, object], details: object = None):
+    """Route search-all by ``lh`` and detail by room code."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/detail"):
+            code, date = detail_request(request)
+            if callable(details):
+                return details(code, date, request)
+            if isinstance(details, dict) and code in details:
+                value = details[code]
+                if isinstance(value, httpx.Response):
+                    return value
+                return httpx.Response(200, json=value)
+            return httpx.Response(200, json=detail_payload(date=date))
+        form = dict(parse_qsl(request.content.decode("utf-8")))
+        body = bodies.get(form.get("lh", "全部"), bodies.get("全部"))
+        return httpx.Response(200, json=body)
+
+    return handler
+
+
+def scope_service(bodies: dict[str, object], details: object = None) -> ClassroomService:
+    return ClassroomService(
+        FreeClassroomClient(transport=httpx.MockTransport(scope_handler(bodies, details)))
+    )
 
 
 def service_for(handler) -> ClassroomService:
@@ -120,10 +221,22 @@ def test_form_is_utf8_sorted_and_uses_repeated_period_keys():
     assert query.public()["selected_period_groups"] == ["上午", "下午"]
 
 
-def test_period_boundaries_accept_one_through_thirteen():
+def test_legacy_candidate_path_is_marked_partial_certainty():
+    body = payload(
+        all_groups={BUILDING: [room("A"), room("B")]},
+        js_groups={BUILDING: [{"code": "A"}]},
+    )
+    result = run(service_for(json_handler(body)))
+    assert result["counts"]["available"] == 1
+    assert result["counts"]["occupied"] == 1
+    assert result["verification"]["checked_all_rooms"] is False
+    assert result["verification"]["availability_certainty"] == "partial"
+
+
+def test_period_boundaries_accept_one_through_twelve():
     body = payload()
-    result = run(service_for(json_handler(body)), periods=list(range(1, 14)))
-    assert result["query"]["periods"] == list(range(1, 14))
+    result = run(service_for(json_handler(body)), periods=list(range(1, 13)))
+    assert result["query"]["periods"] == list(range(1, 13))
     assert result["query"]["selected_period_groups"] == ["上午", "下午", "晚上"]
 
 
@@ -131,6 +244,9 @@ def test_request_is_fixed_anonymous_and_does_not_send_cookies():
     seen: dict[str, object] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/detail"):
+            _code, date = detail_request(request)
+            return httpx.Response(200, json=detail_payload(date=date))
         seen["method"] = request.method
         seen["url"] = str(request.url)
         seen["headers"] = request.headers
@@ -146,7 +262,10 @@ def test_request_is_fixed_anonymous_and_does_not_send_cookies():
     assert headers["content-type"].startswith("application/x-www-form-urlencoded")
     assert "cookie" not in headers
     assert "authorization" not in headers
-    assert b"jc%5B%5D=1&jc%5B%5D=2" in seen["body"]
+    expected = b"&".join(
+        urlencode({"jc[]": value}).encode() for value in ("1", "2")
+    )
+    assert expected in seen["body"]
 
 
 @pytest.mark.parametrize(
@@ -238,6 +357,7 @@ def test_multiple_buildings_occupancy_and_capacity():
         "total": 3,
         "available": 1,
         "occupied": 2,
+        "unknown": 0,
         "matched": 3,
         "returned": 3,
     }
@@ -318,10 +438,241 @@ def test_only_available_filters_cells_but_keeps_school_counts():
         "total": 3,
         "available": 2,
         "occupied": 1,
+        "unknown": 0,
         "matched": 2,
         "returned": 2,
     }
     assert [item["code"] for item in result["rooms"]] == ["A101", "A103"]
+
+
+def test_detail_borrow_block_marks_room_occupied():
+    body = payload(
+        all_groups={BUILDING: [room("ZY-B233", name="卓越B233")]},
+        js_groups={},
+    )
+    details = {
+        "ZY-B233": detail_payload(
+            blocks={1: [{"period": 10, "lessArr": [10, 11, 12], "name": "借用"}]}
+        )
+    }
+    result = run(service_for(json_handler(body, details=details)), periods=[10, 11, 12])
+    assert result["status"] == "ok"
+    assert result["counts"]["available"] == 0
+    assert result["counts"]["occupied"] == 1
+    assert result["counts"]["unknown"] == 0
+    assert result["rooms"][0]["occupied"] is True
+    assert result["rooms"][0]["occupancy_source"] == "detail"
+    assert result["verification"]["detail_checked"] == 1
+    assert result["verification"]["detail_occupied"] == 1
+
+
+def test_detail_verifies_each_selected_period_independently():
+    body = payload(all_groups={BUILDING: [room("A"), room("B")]}, js_groups={})
+    details = {
+        "A": detail_payload(blocks={1: [{"period": 10, "lessArr": [10]}]}),
+        "B": detail_payload(blocks={1: [{"period": 11, "lessArr": [11]}]}),
+    }
+    both = run(service_for(json_handler(body, details=details)), periods=[10, 11])
+    assert both["counts"]["available"] == 0
+    assert both["counts"]["occupied"] == 2
+
+    ten = run(service_for(json_handler(body, details=details)), periods=[10])
+    assert ten["counts"]["available"] == 1
+    assert ten["counts"]["occupied"] == 1
+    assert {item["code"]: item["occupied"] for item in ten["rooms"]} == {
+        "A": True,
+        "B": False,
+    }
+
+
+def test_detail_less_arr_covers_anchor_following_periods():
+    body = payload(all_groups={BUILDING: [room("A")]}, js_groups={})
+    details = {
+        "A": detail_payload(
+            blocks={1: [{"period": 10, "lessArr": [10, 11, 12]}]}
+        )
+    }
+    result = run(service_for(json_handler(body, details=details)), periods=[11])
+    assert result["rooms"][0]["occupied"] is True
+
+
+def test_detail_failure_is_unknown_not_free():
+    body = payload(all_groups={BUILDING: [room("A"), room("B")]}, js_groups={})
+
+    def details(code, date, request):
+        if code == "A":
+            return httpx.Response(500, json={"e": 1})
+        return httpx.Response(200, json=detail_payload(date=date))
+
+    result = run(service_for(json_handler(body, details=details)), periods=[10])
+    assert result["status"] == "ok"
+    assert result["counts"]["available"] == 1
+    assert result["counts"]["unknown"] == 1
+    rooms = {item["code"]: item for item in result["rooms"]}
+    assert rooms["A"]["occupancy_unknown"] is True
+    assert rooms["A"]["occupied"] is None
+    assert rooms["B"]["occupied"] is False
+    assert result["verification"]["detail_failed"] == 1
+    assert result["verification"]["request_complete"] is False
+    assert result["verification"]["complete"] is False
+    assert any("detail 校验失败" in warning for warning in result["warnings"])
+
+
+def test_all_detail_failures_refuse_to_claim_free():
+    body = payload(all_groups={BUILDING: [room("A")]}, js_groups={})
+    details = {"A": httpx.Response(500, json={"e": 1})}
+    with pytest.raises(ClassroomError) as error:
+        run(service_for(json_handler(body, details=details)))
+    assert error.value.code == "availability_unverified"
+    assert error.value.details["reason"] == "upstream_error"
+
+
+def test_detail_rate_limit_is_not_silently_free():
+    body = payload(all_groups={BUILDING: [room("A")]}, js_groups={})
+    details = {"A": httpx.Response(429, json={"e": 1})}
+    with pytest.raises(ClassroomError) as error:
+        run(service_for(json_handler(body, details=details)))
+    assert error.value.code == "availability_unverified"
+    assert error.value.details["reason"] == "rate_limited"
+
+
+def test_search_all_occupied_rooms_skip_detail_lookup():
+    body = payload(
+        all_groups={BUILDING: [room("A"), room("B")]},
+        js_groups={BUILDING: [{"code": "A"}]},
+    )
+    looked_up: list[str] = []
+
+    def details(code, date, request):
+        looked_up.append(code)
+        return httpx.Response(200, json=detail_payload(date=date))
+
+    result = run(service_for(json_handler(body, details=details)))
+    assert looked_up == ["B"]
+    assert result["verification"]["search_all_occupied"] == 1
+    assert result["verification"]["detail_checked"] == 1
+
+
+def test_detail_request_is_fixed_and_anonymous():
+    body = payload(all_groups={BUILDING: [room("A")]}, js_groups={})
+    seen: list[httpx.Request] = []
+
+    def details(code, date, request):
+        seen.append(request)
+        return httpx.Response(200, json=detail_payload(date=date))
+
+    run(service_for(json_handler(body, details=details)))
+    assert len(seen) == 1
+    assert str(seen[0].url) == DETAIL_ENDPOINT
+    assert "cookie" not in seen[0].headers
+    assert "authorization" not in seen[0].headers
+
+
+def test_detail_date_missing_is_fail_closed():
+    body = payload(all_groups={BUILDING: [room("A")]}, js_groups={})
+    details = {"A": detail_payload(date="2026-11-10")}
+    with pytest.raises(ClassroomError) as error:
+        run(service_for(json_handler(body, details=details)))
+    assert error.value.code == "availability_unverified"
+    assert error.value.details["reason"] == "detail_date_missing"
+
+
+def test_detail_parser_maps_weekday_and_less_arr():
+    query = ClassroomQuery.create(campus=CAMPUS, date=DATE, periods=[11])
+    body = detail_payload(blocks={1: [{"period": 10, "lessArr": [10, 11, 12]}]})
+    detail = parse_detail(json.dumps(body).encode(), query, "A101")
+    assert detail.code == "A101"
+    assert detail.occupied_periods == frozenset({10, 11, 12})
+
+
+def test_detail_parser_requires_less_arr():
+    query = ClassroomQuery.create(campus=CAMPUS, date=DATE, periods=[11])
+    body = detail_payload()
+    body["d"]["kclist"]["1"]["c_10"] = {"name": "借用"}
+    with pytest.raises(ClassroomError) as error:
+        parse_detail(json.dumps(body).encode(), query, "A101")
+    assert error.value.code == "schema_changed"
+
+
+def test_detail_parser_rejects_unknown_block_key():
+    query = ClassroomQuery.create(campus=CAMPUS, date=DATE, periods=[11])
+    body = detail_payload()
+    day = body["d"]["kclist"]["1"]
+    day["p_10"] = {"name": "借用", "lessArr": [10]}
+    with pytest.raises(ClassroomError) as error:
+        parse_detail(json.dumps(body).encode(), query, "A101")
+    assert error.value.code == "schema_changed"
+
+
+def test_detail_form_uses_code_and_date():
+    query = ClassroomQuery.create(campus=CAMPUS, date=DATE, periods=[10])
+    assert build_detail_form("ZY-B233", query.date) == "code=ZY-B233&date=2026-10-30"
+
+
+def test_detail_concurrency_is_bounded():
+    active = 0
+    peak = 0
+    lock = asyncio.Lock()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal active, peak
+        async with lock:
+            active += 1
+            peak = max(peak, active)
+        await asyncio.sleep(0.02)
+        async with lock:
+            active -= 1
+        return httpx.Response(200, json=detail_payload(date=DATE))
+
+    client = FreeClassroomClient(transport=httpx.MockTransport(handler))
+    query = ClassroomQuery.create(campus=CAMPUS, date=DATE, periods=[10])
+    results = asyncio.run(
+        client.fetch_details(
+            query,
+            [f"A{index}" for index in range(8)],
+            concurrency=4,
+        )
+    )
+    assert len(results) == 8
+    assert peak <= 4
+
+
+@pytest.mark.parametrize("periods", [[13], [12, 13]])
+def test_period_thirteen_is_unsupported_without_network(periods):
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(200, json=payload())
+
+    with pytest.raises(ClassroomError) as error:
+        run(service_for(handler), periods=periods)
+    assert error.value.code == "unsupported_period"
+    assert error.value.details["period"] == 13
+    assert calls == []
+
+
+def test_unknown_room_makes_empty_availability_explicit():
+    body = payload(all_groups={BUILDING: [room("A"), room("B")]}, js_groups={})
+
+    def details(code, date, request):
+        if code == "A":
+            return httpx.Response(
+                200,
+                json=detail_payload(blocks={1: [{"period": 10, "lessArr": [10]}]}),
+            )
+        return httpx.Response(500, json={"e": 1})
+
+    result = run(
+        service_for(json_handler(body, details=details)),
+        periods=[10],
+        only_available=True,
+    )
+    assert result["status"] == "empty"
+    assert result["reason"] == "verification_incomplete"
+    assert result["availability"] == "unknown"
+    assert result["counts"]["available"] == 0
+    assert result["counts"]["unknown"] == 1
 
 
 def test_pagination_reports_total_truncation_and_offset_errors():
@@ -647,6 +998,9 @@ def test_concurrency_is_bounded_to_four_requests():
 
     async def handler(request: httpx.Request) -> httpx.Response:
         nonlocal active, peak
+        if request.url.path.endswith("/detail"):
+            _code, date = detail_request(request)
+            return httpx.Response(200, json=detail_payload(date=date))
         async with lock:
             active += 1
             peak = max(peak, active)
@@ -668,6 +1022,484 @@ def test_concurrency_is_bounded_to_four_requests():
     assert len(results) == 8
     assert peak == 4
     assert all(result["status"] == "ok" for result in results)
+
+
+def _scope_bodies():
+    east = payload(
+        all_groups={
+            BUILDING: [
+                room("A101", building=BUILDING),
+                room("A102", building=BUILDING),
+            ]
+        },
+        js_groups={BUILDING: [{"code": "A101"}]},
+        buildings=SCOPE_OPTIONS,
+    )
+    south = payload(
+        all_groups={OTHER_BUILDING: [room("B101", building=OTHER_BUILDING)]},
+        js_groups={},
+        buildings=SCOPE_OPTIONS,
+    )
+    all_body = payload(
+        all_groups={
+            BUILDING: [
+                room("A101", building=BUILDING),
+                room("A102", building=BUILDING),
+            ],
+            OTHER_BUILDING: [room("B101", building=OTHER_BUILDING)],
+        },
+        js_groups={BUILDING: [{"code": "A101"}]},
+        buildings=SCOPE_OPTIONS,
+    )
+    return {"全部": all_body, BUILDING: east, OTHER_BUILDING: south}
+
+
+def test_scope_auto_all_returns_overview_without_detail():
+    def forbidden(*args, **kwargs):
+        raise AssertionError("overview must not call detail")
+
+    result = asyncio.run(
+        scope_service(_scope_bodies(), details=forbidden).query_scope(
+            campus=CAMPUS, date=DATE, periods=[1]
+        )
+    )
+    assert result["status"] == "overview"
+    assert result["mode"] == "overview"
+    assert result["rooms"] == []
+    assert result["next_action"] == "choose_buildings"
+    assert result["counts"] == {
+        "total": 3,
+        "search_all_occupied": 1,
+        "candidates": 2,
+    }
+    summaries = {item["id"]: item for item in result["building_summaries"]}
+    assert summaries[BUILDING] == {
+        "id": BUILDING,
+        "name": BUILDING,
+        "total": 2,
+        "search_all_occupied": 1,
+        "candidates": 1,
+        "candidate_ratio": 0.5,
+        "requires_narrowing": True,
+    }
+    assert summaries[OTHER_BUILDING]["candidates"] == 1
+    assert result["verification"]["detail_checked"] == 0
+    assert result["availability_certainty"] == "unverified"
+    assert result["request_budget"]["detail_requested"] == 0
+    assert result["request_budget"]["candidates_not_verified"] == 2
+    assert result["request_budget"]["total_requested"] == 1
+
+
+def test_scope_auto_single_building_full_verifies_every_room():
+    details = {"A101": detail_payload(), "A102": detail_payload()}
+    result = asyncio.run(
+        scope_service(_scope_bodies(), details=details).query_scope(
+            campus=CAMPUS, date=DATE, periods=[1], building=BUILDING
+        )
+    )
+    assert result["mode"] == "full"
+    assert result["query"]["building"] == BUILDING
+    assert result["status"] == "ok"
+    assert result["counts"] == {
+        "total": 2,
+        "available": 1,
+        "occupied": 0,
+        "unknown": 1,
+        "matched": 2,
+        "returned": 2,
+    }
+    assert result["verification"]["search_all_occupied"] == 1
+    assert result["verification"]["detail_checked"] == 2
+    assert result["verification"]["conflicts"] == 1
+    assert result["verification"]["unknown"] == 1
+    assert result["verification"]["unqueried"] == 0
+    assert result["verification"]["request_complete"] is True
+    assert result["availability_certainty"] == "partial"
+    assert result["request_budget"]["detail_requested"] == 2
+    assert result["request_budget"]["detail_attempted"] == 2
+    assert result["request_budget"]["detail_unqueried"] == 0
+    assert result["request_budget"]["total_requested"] == 3
+    rooms = {item["code"]: item for item in result["rooms"]}
+    assert rooms["A101"]["occupancy_source"] == "conflict"
+    assert rooms["A101"]["occupancy_unknown"] is True
+    assert rooms["A101"]["search_all_conflict"] is True
+    assert rooms["A102"]["occupancy_source"] == "detail"
+    assert rooms["A102"]["occupied"] is False
+
+
+def test_scope_full_records_verified_without_conflict():
+    body = payload(
+        all_groups={BUILDING: [room("A101", building=BUILDING)]},
+        js_groups={},
+        buildings=SCOPE_OPTIONS,
+    )
+    result = asyncio.run(
+        scope_service(
+            {"全部": body, BUILDING: body},
+            details={"A101": detail_payload()},
+        ).query_scope(
+            campus=CAMPUS, date=DATE, periods=[1], building=BUILDING, mode="full"
+        )
+    )
+    assert result["counts"]["available"] == 1
+    assert result["counts"]["unknown"] == 0
+    assert result["verification"]["request_complete"] is True
+    assert result["availability_certainty"] == "records_verified"
+    assert result["rooms"][0]["availability"] == "available"
+
+
+def test_scope_too_large_is_rejected_before_detail():
+    body = payload(
+        all_groups={
+            BUILDING: [
+                room(f"A{index}", building=BUILDING) for index in range(301)
+            ]
+        },
+        js_groups={},
+        buildings=SCOPE_OPTIONS,
+    )
+    detail_calls = []
+
+    def details(*args, **kwargs):
+        detail_calls.append(args)
+        return httpx.Response(200, json=detail_payload(date=DATE))
+
+    with pytest.raises(ClassroomError) as error:
+        asyncio.run(
+            scope_service({"全部": body, BUILDING: body}, details=details).query_scope(
+                campus=CAMPUS, date=DATE, periods=[1], building=BUILDING, mode="full"
+            )
+        )
+    assert error.value.code == "scope_too_large"
+    assert error.value.details["limit"] == 300
+    assert detail_calls == []
+
+
+def test_parent_cancellation_drains_detail_tasks_and_allows_next_query():
+    async def scenario():
+        started = asyncio.Event()
+        active = 0
+        requests = 0
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal active, requests
+            if request.url.path.endswith("/detail"):
+                requests += 1
+                active += 1
+                started.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    active -= 1
+                _code, date = detail_request(request)
+                return httpx.Response(200, json=detail_payload(date=date))
+            return httpx.Response(200, json=_scope_bodies()[BUILDING])
+
+        service = ClassroomService(
+            FreeClassroomClient(transport=httpx.MockTransport(handler))
+        )
+        task = asyncio.create_task(
+            service.query_scope(
+                campus=CAMPUS,
+                date=DATE,
+                periods=[1],
+                building=BUILDING,
+                mode="full",
+            )
+        )
+        await asyncio.wait_for(started.wait(), 1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.sleep(0.05)
+        assert active == 0
+        count = requests
+        await asyncio.sleep(0.05)
+        assert requests == count
+
+        next_result = await scope_service(
+            _scope_bodies(), details={"A101": detail_payload(), "A102": detail_payload()}
+        ).query_scope(
+            campus=CAMPUS, date=DATE, periods=[1], building=BUILDING, mode="full"
+        )
+        assert next_result["status"] == "ok"
+
+    asyncio.run(scenario())
+
+
+def test_scope_full_include_conflicts_does_not_upgrade_conflict():
+    details = {"A101": detail_payload(), "A102": detail_payload()}
+    result = asyncio.run(
+        scope_service(_scope_bodies(), details=details).query_scope(
+            campus=CAMPUS,
+            date=DATE,
+            periods=[1],
+            building=BUILDING,
+            include_conflicts=True,
+        )
+    )
+    assert result["counts"]["available"] == 1
+    assert result["counts"]["unknown"] == 1
+    assert result["verification"]["conflicts"] == 1
+    assert result["verification"]["request_complete"] is True
+    assert result["verification"]["complete"] is True
+    assert result["verification"]["availability_certainty"] == "partial"
+    rooms = {item["code"]: item for item in result["rooms"]}
+    assert rooms["A101"]["occupied"] is None
+    assert rooms["A101"]["occupancy_source"] == "conflict"
+    assert rooms["A101"]["occupancy_unknown"] is True
+    assert rooms["A101"]["availability"] == "conflict"
+    assert rooms["A101"]["search_all_conflict"] is True
+    assert [item["code"] for item in result["conflict_candidates"]] == ["A101"]
+    assert any("已弃用" in warning for warning in result["warnings"])
+
+    filtered = asyncio.run(
+        scope_service(_scope_bodies(), details=details).query_scope(
+            campus=CAMPUS,
+            date=DATE,
+            periods=[1],
+            building=BUILDING,
+            only_available=True,
+            include_conflicts=True,
+        )
+    )
+    assert [item["code"] for item in filtered["rooms"]] == ["A102"]
+    assert [item["code"] for item in filtered["conflict_candidates"]] == ["A101"]
+
+
+def test_scope_reserved_conflict_is_not_released_by_include_conflicts():
+    body = payload(
+        all_groups={
+            BUILDING: [
+                room("A101", name="A101研究生专用", building=BUILDING)
+            ]
+        },
+        js_groups={BUILDING: [{"code": "A101"}]},
+        buildings=SCOPE_OPTIONS,
+    )
+    service = scope_service(
+        {"全部": body, BUILDING: body},
+        details={"A101": detail_payload()},
+    )
+    result = asyncio.run(
+        service.query_scope(
+            campus=CAMPUS,
+            date=DATE,
+            periods=[1],
+            building=BUILDING,
+            include_conflicts=True,
+            only_available=False,
+        )
+    )
+    assert result["counts"]["available"] == 0
+    assert result["counts"]["unknown"] == 1
+    assert result["verification"]["reserved"] == 1
+    item = result["rooms"][0]
+    assert item["reserved"] is True
+    assert item["occupancy_source"] == "reserved"
+    assert item["occupancy_unknown"] is True
+    assert item["search_all_conflict"] is True
+
+
+def test_scope_two_buildings_merge_and_paginate():
+    details = {
+        "A101": detail_payload(),
+        "A102": detail_payload(),
+        "B101": detail_payload(),
+    }
+    result = asyncio.run(
+        scope_service(_scope_bodies(), details=details).query_scope(
+            campus=CAMPUS,
+            date=DATE,
+            periods=[1],
+            buildings=[BUILDING, OTHER_BUILDING],
+            only_available=False,
+            offset=1,
+            limit=1,
+        )
+    )
+    assert result["mode"] == "full"
+    assert result["selected_buildings"] == [BUILDING, OTHER_BUILDING]
+    assert result["query"]["buildings"] == [BUILDING, OTHER_BUILDING]
+    assert result["counts"]["total"] == 3
+    assert result["pagination"]["total"] == 3
+    assert result["pagination"]["returned"] == 1
+    assert result["pagination"]["next_offset"] == 2
+    assert [item["code"] for item in result["rooms"]] == ["A102"]
+    assert {
+        item["id"]: item["total"] for item in result["building_summaries"]
+    } == {BUILDING: 2, OTHER_BUILDING: 1}
+
+
+def test_scope_full_all_uses_one_search_all():
+    bodies = _scope_bodies()
+    calls = {"search": 0, "detail": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/detail"):
+            calls["detail"] += 1
+            _code, date = detail_request(request)
+            return httpx.Response(200, json=detail_payload(date=date))
+        calls["search"] += 1
+        form = dict(parse_qsl(request.content.decode("utf-8")))
+        assert form["lh"] == "全部"
+        return httpx.Response(200, json=bodies["全部"])
+
+    service = ClassroomService(
+        FreeClassroomClient(transport=httpx.MockTransport(handler))
+    )
+    result = asyncio.run(
+        service.query_scope(
+            campus=CAMPUS, date=DATE, periods=[1], building="全部", mode="full"
+        )
+    )
+    assert calls == {"search": 1, "detail": 3}
+    assert result["mode"] == "full"
+    assert result["selected_buildings"] == ["全部"]
+    assert result["counts"]["total"] == 3
+    assert result["counts"]["available"] == 2
+    assert result["counts"]["unknown"] == 1
+
+
+def test_scope_overview_can_filter_specific_buildings():
+    detail_calls = []
+
+    def details(*args, **kwargs):
+        detail_calls.append(args)
+        return httpx.Response(200, json=detail_payload(date=DATE))
+
+    result = asyncio.run(
+        scope_service(_scope_bodies(), details=details).query_scope(
+            campus=CAMPUS,
+            date=DATE,
+            periods=[1],
+            buildings=[BUILDING],
+            mode="overview",
+        )
+    )
+    assert result["status"] == "overview"
+    assert result["selected_buildings"] == [BUILDING]
+    assert [item["id"] for item in result["building_summaries"]] == [BUILDING]
+    assert result["counts"]["total"] == 2
+    assert detail_calls == []
+
+
+def test_scope_invalid_scope_is_rejected_without_network():
+    called: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        called.append(request)
+        return httpx.Response(500, json={})
+
+    service = ClassroomService(
+        FreeClassroomClient(transport=httpx.MockTransport(handler))
+    )
+    cases = [
+        ({"buildings": [BUILDING, OTHER_BUILDING, "第三"]}, "invalid_scope"),
+        ({"buildings": ["全部", BUILDING]}, "invalid_scope"),
+        ({"building": BUILDING, "buildings": [OTHER_BUILDING]}, "invalid_scope"),
+        ({"building": BUILDING, "buildings": ["全部"]}, "invalid_scope"),
+        ({"buildings": []}, "invalid_scope"),
+        ({"building": ""}, "invalid_building"),
+        ({"mode": "bad"}, "invalid_mode"),
+    ]
+    for overrides, code in cases:
+        with pytest.raises(ClassroomError) as error:
+            asyncio.run(
+                service.query_scope(
+                    campus=CAMPUS, date=DATE, periods=[1], **overrides
+                )
+            )
+        assert error.value.code == code, overrides
+    assert called == []
+
+
+def test_scope_partial_detail_failure_keeps_search_all_occupied():
+    bodies = _scope_bodies()
+
+    def details(code, date, request):
+        if code == "A101":
+            return httpx.Response(500, json={"e": 1})
+        return httpx.Response(200, json=detail_payload(date=date))
+
+    result = asyncio.run(
+        scope_service(bodies, details=details).query_scope(
+            campus=CAMPUS, date=DATE, periods=[1], building=BUILDING
+        )
+    )
+    assert result["counts"]["available"] == 1
+    assert result["counts"]["occupied"] == 1
+    assert result["counts"]["unknown"] == 0
+    assert result["verification"]["detail_failed"] == 1
+    assert result["verification"]["complete"] is False
+    rooms = {item["code"]: item for item in result["rooms"]}
+    assert rooms["A101"]["occupied"] is True
+    assert rooms["A101"]["occupancy_source"] == "search_all"
+
+
+def test_scope_all_detail_failure_refuses_free():
+    def details(*args, **kwargs):
+        return httpx.Response(500, json={"e": 1})
+
+    with pytest.raises(ClassroomError) as error:
+        asyncio.run(
+            scope_service(_scope_bodies(), details=details).query_scope(
+                campus=CAMPUS, date=DATE, periods=[1], building=BUILDING
+            )
+        )
+    assert error.value.code == "availability_unverified"
+    assert error.value.details["reason"] == "upstream_error"
+
+
+def test_mcp_classroom_scope_passes_mode_and_buildings(tmp_path, monkeypatch):
+    captured: list[dict] = []
+
+    async def fake_scope(self, **kwargs):
+        captured.append(kwargs)
+        return {
+            "status": "overview",
+            "mode": kwargs.get("mode"),
+            "query": {},
+            "counts": {},
+            "rooms": [],
+            "error": None,
+        }
+
+    monkeypatch.setattr(ClassroomService, "query_scope", fake_scope)
+
+    async def scenario():
+        async with Client(create_server(tmp_path)) as client:
+            first = await client.call_tool(
+                "upc_free_classrooms",
+                {"campus": CAMPUS, "date": DATE, "periods": [1]},
+            )
+            assert not first.is_error
+            assert captured[-1]["mode"] == "auto"
+            assert captured[-1]["buildings"] is None
+            assert captured[-1]["include_conflicts"] is False
+            second = await client.call_tool(
+                "upc_free_classrooms",
+                {
+                    "campus": CAMPUS,
+                    "date": DATE,
+                    "periods": [1],
+                    "buildings": [BUILDING],
+                    "mode": "full",
+                    "include_conflicts": True,
+                    "only_available": True,
+                    "offset": 5,
+                    "limit": 10,
+                },
+            )
+            assert not second.is_error
+            assert captured[-1]["buildings"] == [BUILDING]
+            assert captured[-1]["mode"] == "full"
+            assert captured[-1]["include_conflicts"] is True
+            assert captured[-1]["only_available"] is True
+            assert captured[-1]["offset"] == 5
+            assert captured[-1]["limit"] == 10
+
+    asyncio.run(scenario())
 
 
 def test_mcp_classroom_error_does_not_block_other_tools(tmp_path, monkeypatch):
@@ -692,7 +1524,7 @@ def test_mcp_classroom_error_does_not_block_other_tools(tmp_path, monkeypatch):
             assert invalid.is_error
             assert invalid.structured_content["status"] == "invalid_campus"
 
-            monkeypatch.setattr(ClassroomService, "query", failed_classroom)
+            monkeypatch.setattr(ClassroomService, "query_scope", failed_classroom)
             monkeypatch.setattr(CardBalanceService, "query", working_balance)
             monkeypatch.setattr(ShiguangService, "activities", working_activities)
 
@@ -728,7 +1560,7 @@ def test_slow_classroom_call_does_not_block_balance(tmp_path, monkeypatch):
         async def working_balance(self):
             return {"status": "ok", "source_system": "card_balance", "data": {}}
 
-        monkeypatch.setattr(ClassroomService, "query", slow_classroom)
+        monkeypatch.setattr(ClassroomService, "query_scope", slow_classroom)
         monkeypatch.setattr(CardBalanceService, "query", working_balance)
         async with Client(create_server(tmp_path)) as client:
             pending = asyncio.create_task(
