@@ -106,7 +106,7 @@ def create_server(directory: Path) -> MCPServer:
                     "classrooms": "none_public_query",
                     "library": "local_dpapi_seat_token_or_unified_cas_auto_auth",
                     "service_portal": (
-                        "public_catalog_anonymous_or_unified_cas_auto_auth_for_self_lists"
+                        "saved_identity_catalog_or_explicit_public_catalog"
                     ),
                     "shiguang": "local_adopted_session_or_conditional_cas_sso_or_unified_auto_auth",
                     "timetable": "local_dpapi_business_cookie_or_unified_cas_auto_auth",
@@ -152,6 +152,9 @@ def create_server(directory: Path) -> MCPServer:
                     "shiguang_cancel_registration": "not_implemented",
                     "shiguang_profile_write": "not_implemented",
                     "service_portal_search": "implemented",
+                    "service_portal_search_scope": (
+                        "saved_identity_catalog_or_explicit_public_catalog"
+                    ),
                     "service_portal_guide": "implemented",
                     "service_portal_my_todos": "implemented",
                     "service_portal_my_applications": "implemented",

@@ -1,8 +1,11 @@
 """Read-only e站通 service: catalog/guide and self todo/application progress.
 
-Public catalog/guide reads are anonymous. Personal reads use only the unified
-CAS coordinator and this adapter's independent DPAPI session/store/lock. No
-write endpoint, no form/attachment/third-party page, and no ID walking exists.
+Search uses the complete catalog visible to the saved account when one is
+configured, then matches and paginates locally.  Without a usable account it
+falls back to the public catalog and labels that scope explicitly.  Personal
+reads use only the unified CAS coordinator and this adapter's independent
+DPAPI session/store/lock.  No write endpoint, no form/attachment/third-party
+page, and no ID walking exists.
 """
 
 from __future__ import annotations
@@ -33,6 +36,23 @@ if TYPE_CHECKING:
 
 ACTIVE_STATES = {"stored", "unverified"}
 NETWORK_CONCURRENCY = 4
+
+# A saved account that cannot be used must not make the public catalog
+# unavailable.  These are local/session/auth failures only: upstream 5xx and
+# schema changes are reported instead of being hidden by a public fallback.
+AUTH_FALLBACK_CODES = {
+    "auth_required",
+    "auth_expired",
+    "auth_in_progress",
+    "credential_changed",
+    "identity_mismatch",
+    "user_action_required",
+    "local_error",
+}
+GUIDE_FALLBACK_CODES = {
+    *AUTH_FALLBACK_CODES,
+    "access_denied",
+}
 
 
 class ServicePortalService:
@@ -72,7 +92,13 @@ class ServicePortalService:
     def _map_auto(error: AutoAuthError) -> ServicePortalError:
         code = error.code
         details: dict[str, Any] = {}
-        if code in {"credential_missing", "credential_reconfigure_required"}:
+        if code in {
+            "credential_missing",
+            "credential_reconfigure_required",
+            "credential_unreadable",
+            "cas_invalid_credentials",
+            "cas_login_rejected",
+        }:
             return ServicePortalError(
                 "auth_required",
                 "统一认证尚未配置或密码已被拒绝；请在本机完成凭据配置。",
@@ -365,6 +391,21 @@ class ServicePortalService:
             return payload, session
         raise ServicePortalError("auth_required", "e站通会话仍不可用。")
 
+    @staticmethod
+    def _fallback_next_action(error: ServicePortalError | None) -> str:
+        if error is None:
+            return "configure_account_or_restore_session"
+        if error.action:
+            return error.action
+        return {
+            "identity_mismatch": "service_portal_clear",
+            "credential_changed": "service_portal_clear",
+            "auth_expired": "service_portal_auto_auth",
+            "auth_in_progress": "retry_later",
+            "user_action_required": "service_portal_unlock",
+            "local_error": "retry_later",
+        }.get(error.code, "service_portal_auto_auth")
+
     async def search(
         self, *, keyword: str | None, page: int = 1, page_size: int = 20
     ) -> dict:
@@ -380,42 +421,164 @@ class ServicePortalService:
         if keyword is not None and len(keyword) > 40:
             raise ServicePortalError("invalid_input", "keyword 超过 40 个字符。")
 
-        async with self._network_gate:
-            result = await asyncio.to_thread(
-                self._search_sync, keyword, page, page_size
-            )
+        authenticated = False
+        auth_error: ServicePortalError | None = None
+        result: dict | None = None
+        if self.auto_auth is not None:
+            try:
+                current = await asyncio.to_thread(self._binding)
+                if current.configured:
+                    result, _session = await self._with_session(
+                        lambda client, _binding: client.catalog_search(
+                            keyword=keyword, page=page, page_size=page_size
+                        )
+                    )
+                    authenticated = True
+            except ServicePortalError as error:
+                if error.code not in AUTH_FALLBACK_CODES:
+                    raise
+                auth_error = error
+        if result is None:
+            async with self._network_gate:
+                result = await asyncio.to_thread(
+                    self._search_sync, keyword, page, page_size
+                )
+
         payload = self._base(
             "ok",
-            anonymous=True,
+            anonymous=not authenticated,
             query={"keyword": keyword, "page": page, "page_size": page_size},
         )
-        payload.update(result)
+        catalog_warnings = list(result.get("warnings", []))
+        payload.update({key: value for key, value in result.items() if key != "warnings"})
+        payload["warnings"].extend(catalog_warnings)
+        payload["public_catalog_only"] = not authenticated
+        payload["catalog_source"] = "apps/list"
+        catalog = result.get("catalog") or {}
+        if not authenticated:
+            payload["warnings"].append(
+                "public_catalog_only: 当前只检索匿名公开目录；这不是完整本人可见目录，"
+                "可能缺少登录后才出现的请销假等事项。"
+            )
+            if auth_error is not None:
+                payload["warnings"].append(
+                    f"saved_account_unavailable: 已保存账号本次不可用（{auth_error.code}），"
+                    "已退回公开目录。"
+                )
+            payload["next_action"] = self._fallback_next_action(auth_error)
+        elif result.get("total") == 0:
+            payload["warnings"].append(
+                "not_found_in_current_identity_catalog: 只表示当前账号可见目录未命中，"
+                "不代表全校或其他身份不存在该事项。"
+            )
         with self._department_lock:
             for item in result["items"]:
                 if item.get("department"):
                     self._departments[item["id"]] = item["department"]
-        payload["coverage"] = {"anonymous": True, "page": page, "page_size": page_size}
+        payload["coverage"] = {
+            "source_system": "service_portal",
+            "scope": "authenticated_catalog" if authenticated else "public_catalog",
+            "catalog_source": "apps/list",
+            "catalog_total": catalog.get("total"),
+            "searchable_total": catalog.get("searchable_total"),
+            "folder_count": catalog.get("folder_count"),
+            "duplicate_id_count": catalog.get("duplicate_id_count"),
+            "duplicate_service_id_count": catalog.get("duplicate_service_id_count"),
+            "catalog_complete_for_source": catalog.get("complete") is True,
+            "identity_visible_catalog": authenticated,
+            "identity_scope_complete": authenticated
+            and catalog.get("complete") is True,
+            "public_catalog_only": not authenticated,
+            "all_identities": False,
+            "school_wide": False,
+            "keyword_matching": "local_catalog",
+            "matched_total": result.get("total"),
+            "page": page,
+            "page_size": page_size,
+            "pages_total": result.get("pages_total"),
+            "page_in_range": result.get("page_in_range"),
+            "complete_for_page": result.get("complete_for_page"),
+            "complete_for_scope": result.get("complete_for_scope"),
+            "has_more": result.get("has_more"),
+            "next_page": result.get("next_page"),
+            "auth_error": auth_error.code if auth_error else None,
+            "auth_action": auth_error.action if auth_error else None,
+            "scope_note": (
+                "登录时覆盖当前账号可见目录；匿名目录不是完整个人可见目录，"
+                "也不能代表全校或其他身份。"
+            ),
+        }
         return payload
 
     def _search_sync(self, keyword: str | None, page: int, page_size: int) -> dict:
         client = self._client(None)
         try:
-            return client.search(keyword=keyword, page=page, page_size=page_size)
+            return client.catalog_search(
+                keyword=keyword, page=page, page_size=page_size
+            )
         finally:
             client.close()
 
     async def guide(self, service_id: int) -> dict:
+        if type(service_id) is not int or service_id < 1:
+            raise ServicePortalError("invalid_input", "service_id 必须是正整数。")
         with self._department_lock:
             department = self._departments.get(service_id)
-        async with self._network_gate:
-            result = await asyncio.to_thread(
-                self._guide_sync, service_id, department
-            )
-        payload = self._base("ok", anonymous=True, query={"service_id": service_id})
-        payload.update(result)
+        authenticated = False
+        auth_error: ServicePortalError | None = None
+        result: dict | None = None
+        if self.auto_auth is not None:
+            try:
+                current = await asyncio.to_thread(self._binding)
+                if current.configured:
+                    result, _session = await self._with_session(
+                        lambda client, _binding: client.guide(
+                            service_id, department=department
+                        )
+                    )
+                    authenticated = True
+            except ServicePortalError as error:
+                if error.code not in GUIDE_FALLBACK_CODES:
+                    raise
+                auth_error = error
+        if result is None:
+            async with self._network_gate:
+                result = await asyncio.to_thread(
+                    self._guide_sync, service_id, department
+                )
+        payload = self._base(
+            "ok", anonymous=not authenticated, query={"service_id": service_id}
+        )
+        guide_warnings = list(result.get("warnings", []))
+        payload.update({key: value for key, value in result.items() if key != "warnings"})
+        payload["warnings"].extend(guide_warnings)
+        payload["public_guide_only"] = not authenticated
         if department is None:
             payload["warnings"].append("department_not_cached")
-        payload["coverage"] = {"anonymous": True, "guide_source": "official_detail"}
+        if not authenticated and auth_error is not None:
+            payload["warnings"].append(
+                f"saved_account_unavailable: 已保存账号本次不可用（{auth_error.code}），"
+                "已退回公开指南。"
+            )
+            payload["warnings"].append(
+                "public_guide_only: 公开指南可能不包含仅登录可见的完整内容。"
+            )
+            payload["next_action"] = self._fallback_next_action(auth_error)
+        payload["coverage"] = {
+            "source_system": "service_portal",
+            "scope": "authenticated_guide" if authenticated else "public_guide",
+            "guide_source": "official_detail",
+            "identity_visible_catalog": authenticated,
+            "identity_scope_complete": authenticated,
+            "public_guide_only": not authenticated,
+            "all_identities": False,
+            "auth_error": auth_error.code if auth_error else None,
+            "auth_action": auth_error.action if auth_error else None,
+            "scope_note": (
+                "已保存账号可用时按同一账号读取指南；否则退回公开指南，"
+                "不得把公开指南当作登录后完整内容。"
+            ),
+        }
         return payload
 
     def _guide_sync(self, service_id: int, department: str | None) -> dict:
@@ -425,46 +588,90 @@ class ServicePortalService:
         finally:
             client.close()
 
-    async def my_todos(self, *, page: int = 1) -> dict:
-        if page != 1:
-            raise ServicePortalError(
-                "invalid_input", "当前仅验证了待办第 1 页；不提供其它页。"
-            )
+    async def my_todos(self, *, page: int = 1, page_size: int = 20) -> dict:
+        if not 1 <= page <= MAX_PAGE or not 1 <= page_size <= MAX_PAGE_SIZE:
+            raise ServicePortalError("invalid_input", "分页参数超出范围。")
         result, _session = await self._with_session(
-            lambda client, current: client.todos(current.account_hash)
+            lambda client, current: client.todos(
+                current.account_hash, page=page, page_size=page_size
+            )
         )
         payload = self._base(
             "ok",
-            query={"page": 1, "status": 1},
+            query={"page": page, "page_size": page_size, "status": 1},
         )
         payload.update(result)
+        if not result.get("page_in_range", True):
+            payload["warnings"].append("page_out_of_range: 本页超出当前待办范围。")
+        if result.get("total", 0) > 0 and not result.get("complete_for_scope"):
+            payload["warnings"].append(
+                "scope_not_fully_read: 本次只读取一页，不能声称全部待办已查完。"
+            )
         payload["coverage"] = {
-            "page": 1,
+            "scope": "pending_at_me",
+            "scope_note": (
+                "已验证的 status=1 待办页；只包含当前需要本人处理的事项，"
+                "不包含未读消息、其他状态或完整历史。"
+            ),
             "status_filter": 1,
+            "status_filter_source": "verified_request_filter",
             "all_statuses": False,
-            "full_history": False,
+            "unread_messages_included": False,
+            "page": page,
+            "page_size": page_size,
+            "pages_total": result.get("pages_total"),
+            "page_in_range": result.get("page_in_range"),
+            "complete_for_page": result.get("complete_for_page"),
+            "complete_for_scope": result.get("complete_for_scope"),
+            "complete_for_scope_reason": result.get("complete_for_scope_reason"),
+            "has_more": result.get("has_more"),
+            "next_page": result.get("next_page"),
+            "remaining_after_page": result.get("remaining_after_page"),
         }
         return payload
 
-    async def my_applications(self, *, page: int = 1) -> dict:
-        if page != 1:
-            raise ServicePortalError(
-                "invalid_input", "当前仅验证了申请第 1 页；不提供其它页。"
-            )
+    async def my_applications(self, *, page: int = 1, page_size: int = 20) -> dict:
+        if not 1 <= page <= MAX_PAGE or not 1 <= page_size <= MAX_PAGE_SIZE:
+            raise ServicePortalError("invalid_input", "分页参数超出范围。")
         result, _session = await self._with_session(
-            lambda client, current: client.applications(current.account_hash)
+            lambda client, current: client.applications(
+                current.account_hash, page=page, page_size=page_size
+            )
         )
         payload = self._base(
             "ok",
-            query={"page": 1, "status": 1},
+            query={"page": page, "page_size": page_size, "status": 1},
         )
         payload.update(result)
+        if not result.get("page_in_range", True):
+            payload["warnings"].append("page_out_of_range: 本页超出当前申请范围。")
+        if result.get("total", 0) > 0 and not result.get("complete_for_scope"):
+            payload["warnings"].append(
+                "scope_not_fully_read: 本次只读取一页，不能声称全部申请已查完。"
+            )
         payload["coverage"] = {
-            "page": 1,
+            "scope": "my_applications_in_progress",
+            "scope_note": (
+                "已验证的 status=1 在办申请页；可能与“待本人处理”队列不同，"
+                "其中可能有等待他人处理的申请，也可能不含其他状态或完整历史。"
+            ),
             "status_filter": 1,
+            "status_filter_source": "verified_request_filter",
             "all_statuses": False,
-            "full_history": False,
+            "pending_at_me_queue": False,
+            "waiting_on_others_possible": True,
+            "unread_messages_included": False,
             "third_party_records_marked": True,
+            "page": page,
+            "page_size": page_size,
+            "pages_total": result.get("pages_total"),
+            "page_in_range": result.get("page_in_range"),
+            "complete_for_page": result.get("complete_for_page"),
+            "complete_for_scope": result.get("complete_for_scope"),
+            "complete_for_scope_reason": result.get("complete_for_scope_reason"),
+            "has_more": result.get("has_more"),
+            "next_page": result.get("next_page"),
+            "remaining_after_page": result.get("remaining_after_page"),
         }
         return payload
 

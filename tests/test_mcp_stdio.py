@@ -42,6 +42,30 @@ def test_real_stdio_discovery_and_structured_auth_error(tmp_path, mode):
             }
             assert "upc_card_transactions" not in {t.name for t in tools}
             assert "upc_timetable_semester" not in {t.name for t in tools}
+            service_search = next(t for t in tools if t.name == "upc_service_search")
+            assert service_search.annotations.read_only_hint is True
+            assert service_search.annotations.destructive_hint is False
+            assert set(service_search.input_schema["properties"]) == {
+                "keyword",
+                "page",
+                "page_size",
+            }
+            assert service_search.input_schema["properties"]["page"]["maximum"] == 50
+            assert service_search.input_schema["properties"]["page_size"]["maximum"] == 50
+            assert "service5" not in (service_search.description or "").lower()
+            service_guide = next(t for t in tools if t.name == "upc_service_guide")
+            assert set(service_guide.input_schema["properties"]) == {"service_id"}
+            assert service_guide.input_schema["required"] == ["service_id"]
+            for name in ("upc_service_my_todos", "upc_service_my_applications"):
+                service_tool = next(t for t in tools if t.name == name)
+                assert service_tool.annotations.read_only_hint is True
+                assert set(service_tool.input_schema["properties"]) == {
+                    "page",
+                    "page_size",
+                    "session_ref",
+                }
+                assert service_tool.input_schema["properties"]["page"]["maximum"] == 50
+                assert service_tool.input_schema["properties"]["page_size"]["maximum"] == 50
             balance = next(t for t in tools if t.name == "upc_card_balance")
             assert balance.annotations.read_only_hint is True
             assert set(balance.input_schema["properties"]) == {"session_ref"}
@@ -353,6 +377,12 @@ def test_real_stdio_discovery_and_structured_auth_error(tmp_path, mode):
             assert (
                 capabilities.structured_content["service_portal_identity_verified"]
                 is False
+            )
+            assert (
+                capabilities.structured_content["capabilities"][
+                    "service_portal_search_scope"
+                ]
+                == "saved_identity_catalog_or_explicit_public_catalog"
             )
             assert "upc_library_book" in capabilities.structured_content["write_tools"]
             assert capabilities.structured_content["read_only"] is False

@@ -49,10 +49,11 @@ def session(account_hash="a" * 64, generation=1, state="stored"):
 
 
 class FakeAuto:
-    def __init__(self, current=None, recover=None, error=None):
+    def __init__(self, current=None, recover=None, error=None, binding_error=None):
         self.current = current or binding()
         self.recover_session = recover
         self.error = error
+        self.binding_error = binding_error
         self.calls = 0
         self.allow_password = None
         self.credentials = self
@@ -65,6 +66,8 @@ class FakeAuto:
         return self.current
 
     def binding(self):
+        if self.binding_error is not None:
+            raise self.binding_error
         return self.current
 
     def recover_sync(self, system, *, allow_password=True):
@@ -86,7 +89,15 @@ class FakeClient:
             "total": 0,
             "count": 0,
             "empty": True,
+            "empty_page": True,
             "has_more": False,
+            "next_page": None,
+            "pages_total": 1,
+            "page_in_range": True,
+            "complete_for_page": True,
+            "complete_for_scope": True,
+            "complete_for_scope_reason": "empty_scope",
+            "remaining_after_page": 0,
             "items": [],
             "status_filter": 1,
             "page": 1,
@@ -95,7 +106,15 @@ class FakeClient:
             "total": 0,
             "count": 0,
             "empty": True,
+            "empty_page": True,
             "has_more": False,
+            "next_page": None,
+            "pages_total": 1,
+            "page_in_range": True,
+            "complete_for_page": True,
+            "complete_for_scope": True,
+            "complete_for_scope_reason": "empty_scope",
+            "remaining_after_page": 0,
             "items": [],
             "third_party_count": 0,
             "status_filter": 1,
@@ -105,30 +124,71 @@ class FakeClient:
         self.fail_first = fail_first
         self.calls = []
         self.closed = 0
+        self.catalog_error = None
+        self.guide_error = None
+        self.guide_result = None
 
     def search(self, *, keyword, page, page_size):
-        self.calls.append(("search", keyword, page, page_size))
+        raise AssertionError("the legacy server search endpoint must not be used")
+
+    def catalog_search(self, *, keyword, page, page_size):
+        self.calls.append(("catalog_search", keyword, page, page_size))
+        if self.catalog_error is not None:
+            raise self.catalog_error
+        terms = (keyword or "").casefold().split()
+        matched = []
+        for row in self.catalog_rows:
+            if row.get("folder"):
+                continue
+            haystack = " ".join(
+                value for value in (row.get("name"), row.get("department")) if value
+            ).casefold()
+            if all(term in haystack for term in terms):
+                matched.append(row)
+        start = (page - 1) * page_size
+        items = matched[start : start + page_size]
+        pages_total = max(1, (len(matched) + page_size - 1) // page_size)
+        page_in_range = page <= pages_total
+        expected = min(page_size, max(0, len(matched) - start))
         return {
-            "total": 1,
+            "total": len(matched),
             "page": page,
             "page_size": page_size,
-            "count": 1,
-            "has_more": False,
-            "items": [
-                {
-                    "id": 1,
-                    "name": "synthetic",
-                    "department": "部门",
-                    "type": 1,
-                    "access": "native_form",
-                    "external_host": None,
-                    "folder": False,
-                }
-            ],
+            "count": len(items),
+            "returned": len(items),
+            "empty": not matched,
+            "empty_page": not items,
+            "pages_total": pages_total,
+            "page_in_range": page_in_range,
+            "complete_for_page": page_in_range and len(items) == expected,
+            "complete_for_scope": True,
+            "complete_for_scope_reason": "full_catalog_fetched",
+            "has_more": start + len(items) < len(matched),
+            "next_page": page + 1 if start + len(items) < len(matched) else None,
+            "remaining_after_page": max(0, len(matched) - start - len(items)),
+            "items": items,
+            "catalog": {
+                "total": len(self.catalog_rows),
+                "searchable_total": sum(
+                    1 for row in self.catalog_rows if not row.get("folder")
+                ),
+                "folder_count": sum(
+                    1 for row in self.catalog_rows if row.get("folder")
+                ),
+                "duplicate_id_count": 0,
+                "duplicate_service_id_count": 0,
+                "complete": True,
+                "matched_total": len(matched),
+            },
+            "warnings": [],
         }
 
     def guide(self, service_id, *, department):
         self.calls.append(("guide", service_id, department))
+        if self.guide_error is not None:
+            raise self.guide_error
+        if self.guide_result is not None:
+            return self.guide_result
         return {
             "service_id": service_id,
             "name": "synthetic",
@@ -143,15 +203,15 @@ class FakeClient:
         self.calls.append(("catalog",))
         return self.catalog_rows
 
-    def todos(self, account_hash):
-        self.calls.append(("todos", account_hash))
+    def todos(self, account_hash, *, page=1, page_size=20):
+        self.calls.append(("todos", account_hash, page, page_size))
         if self.fail_first:
             self.fail_first = False
             raise ServicePortalError("auth_required", "expired")
         return self.todo
 
-    def applications(self, account_hash):
-        self.calls.append(("applications", account_hash))
+    def applications(self, account_hash, *, page=1, page_size=20):
+        self.calls.append(("applications", account_hash, page, page_size))
         if self.fail_first:
             self.fail_first = False
             raise ServicePortalError("auth_expired", "expired")
@@ -214,7 +274,7 @@ def test_late_personal_result_is_discarded_without_recovery_or_read_retry(tmp_pa
     service.store.replace(session())
     calls = []
 
-    def query(_account):
+    def query(_account, *, page=1, page_size=20):
         calls.append("query")
         if change == "business_clear":
             service.store.clear()
@@ -265,7 +325,7 @@ def test_cookie_transport_preserves_secure_path_expiry_and_host_only():
     assert stored.secure and not stored.domain_specified
     assert stored.has_nonstandard_attr("HttpOnly")
     assert stored.expires == int(cookie.expires_at)
-    with httpx.Client(cookies=jar) as client:
+    with httpx.Client(cookies=jar, trust_env=False) as client:
         assert "synthetic=" in client.build_request(
             "GET", "https://service.upc.edu.cn/site/my-task/todo"
         ).headers["cookie"]
@@ -277,30 +337,149 @@ def test_cookie_transport_preserves_secure_path_expiry_and_host_only():
         ).headers
 
 
-def test_anonymous_search_and_guide_do_not_touch_auto_auth(tmp_path):
+def test_public_search_without_auto_auth_uses_full_public_catalog_and_no_login(tmp_path):
     async def _run():
-        client = FakeClient(catalog=[{"id": 1, "departName": "部门"}])
-        auto = FakeAuto(error=AssertionError("must not be called"))
-        service = make_service(tmp_path, client, auto=auto)
-        search = await service.search(keyword=" 事项 ", page=2, page_size=10)
+        client = FakeClient(
+            catalog=[
+                {"id": 1, "name": "公开事项", "department": "部门"},
+                {"id": 2, "name": "本科生请销假", "department": "学生工作部门"},
+            ]
+        )
+        service = make_service(tmp_path, client, auto=None)
+        search = await service.search(keyword=" 本科生 请销假 ", page=1, page_size=10)
         assert search["status"] == "ok"
         assert search["session_ref"] == "anonymous"
-        assert search["query"] == {"keyword": "事项", "page": 2, "page_size": 10}
+        assert search["query"] == {
+            "keyword": "本科生 请销假",
+            "page": 1,
+            "page_size": 10,
+        }
+        assert search["total"] == 1
+        assert search["items"][0]["name"] == "本科生请销假"
+        assert search["public_catalog_only"] is True
+        assert search["coverage"]["scope"] == "public_catalog"
+        assert search["coverage"]["identity_visible_catalog"] is False
+        assert search["coverage"]["identity_scope_complete"] is False
+        assert search["next_action"] == "configure_account_or_restore_session"
+        assert any(
+            warning.startswith("public_catalog_only") for warning in search["warnings"]
+        )
+        assert client.calls[0] == ("catalog_search", "本科生 请销假", 1, 10)
+
         guide = await service.guide(1)
         assert guide["status"] == "ok"
-        assert guide["department"] == "部门"
-        uncached = await service.guide(999)
-        assert uncached["department"] is None
-        assert "department_not_cached" in uncached["warnings"]
-        assert auto.calls == 0
-        assert client.calls[0] == ("search", "事项", 2, 10)
+        assert guide["department"] is None
+        assert "department_not_cached" in guide["warnings"]
+        assert guide["coverage"]["scope"] == "public_guide"
+        assert guide["public_guide_only"] is True
     asyncio.run(_run())
+
+
+def test_saved_account_search_uses_authenticated_catalog_scope(tmp_path):
+    async def _run():
+        store = ServicePortalStore(tmp_path)
+        store.replace(session())
+        client = FakeClient(
+            catalog=[
+                {"id": 1, "name": "公开事项", "department": "部门"},
+                {"id": 198, "name": "本科生请销假", "department": "学生工作部门"},
+            ]
+        )
+        auto = FakeAuto()
+        service = make_service(tmp_path, client, auto=auto)
+        search = await service.search(keyword="本科生请销假")
+        assert search["status"] == "ok"
+        assert search["session_ref"] == "self"
+        assert search["total"] == 1
+        assert search["items"][0]["id"] == 198
+        assert search["public_catalog_only"] is False
+        assert search["coverage"]["scope"] == "authenticated_catalog"
+        assert search["coverage"]["identity_visible_catalog"] is True
+        assert search["coverage"]["identity_scope_complete"] is True
+        assert search["coverage"]["all_identities"] is False
+        assert search["coverage"]["catalog_total"] == 2
+        assert "next_action" not in search
+        assert client.calls[0] == ("catalog_search", "本科生请销假", 1, 20)
+    asyncio.run(_run())
+
+
+def test_authenticated_empty_match_is_not_reported_as_school_wide_absence(tmp_path):
+    async def _run():
+        store = ServicePortalStore(tmp_path)
+        store.replace(session())
+        client = FakeClient(
+            catalog=[{"id": 1, "name": "公开事项", "department": "部门"}]
+        )
+        service = make_service(tmp_path, client, auto=FakeAuto())
+        search = await service.search(keyword="本科生请销假")
+        assert search["total"] == 0
+        assert search["public_catalog_only"] is False
+        assert search["coverage"]["scope"] == "authenticated_catalog"
+        assert any(
+            warning.startswith("not_found_in_current_identity_catalog")
+            for warning in search["warnings"]
+        )
+        assert "next_action" not in search
+    asyncio.run(_run())
+
 
 def test_public_search_survives_bad_credential_or_no_auto_auth(tmp_path):
     async def _run():
-        client = FakeClient()
+        client = FakeClient(
+            catalog=[{"id": 1, "name": "公开事项", "department": "部门"}]
+        )
         service = make_service(tmp_path, client, auto=None)
         assert (await service.search(keyword=None))["status"] == "ok"
+
+        no_credential = FakeAuto(
+            binding_error=AutoAuthError(
+                "credential_missing",
+                "raw credential text must not cross",
+                action="credential_configure",
+            )
+        )
+        service = make_service(tmp_path, client, auto=no_credential)
+        fallback = await service.search(keyword="请销假")
+        assert fallback["public_catalog_only"] is True
+        assert fallback["next_action"] == "credential_configure"
+        assert fallback["coverage"]["auth_error"] == "auth_required"
+        assert "raw credential" not in str(fallback)
+
+        bad_session = FakeAuto(
+            error=ServicePortalError("auth_required", "expired"),
+        )
+        service = make_service(tmp_path, client, auto=bad_session)
+        fallback = await service.search(keyword="请销假")
+        assert fallback["public_catalog_only"] is True
+        assert fallback["next_action"] == "service_portal_auto_auth"
+        assert fallback["coverage"]["auth_error"] == "auth_required"
+
+        rejected = FakeAuto(
+            error=AutoAuthError(
+                "cas_invalid_credentials",
+                "raw credential text must not cross",
+            )
+        )
+        service = make_service(tmp_path, client, auto=rejected)
+        fallback = await service.search(keyword="请销假")
+        assert fallback["public_catalog_only"] is True
+        assert fallback["next_action"] == "credential_configure"
+        assert fallback["coverage"]["auth_error"] == "auth_required"
+        assert "raw credential" not in str(fallback)
+    asyncio.run(_run())
+
+
+def test_authenticated_upstream_or_schema_failure_is_not_hidden_by_public_fallback(tmp_path):
+    async def _run():
+        store = ServicePortalStore(tmp_path)
+        store.replace(session())
+        for code in ("service_upstream_error", "schema_changed"):
+            client = FakeClient()
+            client.catalog_error = ServicePortalError(code, "synthetic failure")
+            service = make_service(tmp_path, client, auto=FakeAuto())
+            with pytest.raises(ServicePortalError) as caught:
+                await service.search(keyword="请销假")
+            assert caught.value.code == code
     asyncio.run(_run())
 
 def test_personal_without_auto_auth_is_auth_required(tmp_path):
@@ -324,7 +503,7 @@ def test_todo_uses_binding_account_and_reports_empty_state(tmp_path):
         assert result["session_ref"] == "self"
         assert result["empty"] is True
         assert result["coverage"]["status_filter"] == 1
-        assert client.calls == [("todos", "a" * 64)]
+        assert client.calls == [("todos", "a" * 64, 1, 20)]
     asyncio.run(_run())
 
 def test_one_auth_recovery_then_one_retry(tmp_path):
@@ -344,7 +523,7 @@ def test_one_auth_recovery_then_one_retry(tmp_path):
 def test_second_auth_failure_does_not_loop(tmp_path):
     async def _run():
         class AlwaysFail(FakeClient):
-            def todos(self, account_hash):
+            def todos(self, account_hash, *, page=1, page_size=20):
                 self.calls.append(("todos", account_hash))
                 raise ServicePortalError("auth_required", "expired")
 
@@ -362,7 +541,7 @@ def test_second_factor_is_not_retried_or_recovered(tmp_path):
         store.replace(session())
 
         class Totp(FakeClient):
-            def todos(self, account_hash):
+            def todos(self, account_hash, *, page=1, page_size=20):
                 raise ServicePortalError(
                     "user_action_required",
                     "second factor",
@@ -385,7 +564,7 @@ def test_upstream_403_and_schema_do_not_trigger_login(tmp_path):
         auto = FakeAuto(error=AssertionError("must not recover"))
 
         class Upstream(FakeClient):
-            def todos(self, account_hash):
+            def todos(self, account_hash, *, page=1, page_size=20):
                 raise ServicePortalError("service_upstream_error", "503")
 
         service = make_service(tmp_path, Upstream(), auto=auto)
@@ -395,7 +574,7 @@ def test_upstream_403_and_schema_do_not_trigger_login(tmp_path):
         assert auto.calls == 0
 
         class Schema(FakeClient):
-            def todos(self, account_hash):
+            def todos(self, account_hash, *, page=1, page_size=20):
                 raise ServicePortalError("schema_changed", "bad")
 
         service = make_service(tmp_path, Schema(), auto=auto)
@@ -522,6 +701,244 @@ def test_status_never_claims_identity_and_clear_increments_generation(tmp_path):
         assert cleared["generation"] == 2
         assert (await service.status())["status"] == "auth_required"
     asyncio.run(_run())
+
+def test_search_auth_expiry_recovers_once_and_retries_once(tmp_path):
+    async def _run():
+        store = ServicePortalStore(tmp_path)
+        store.replace(session())
+        auto = FakeAuto(recover=session())
+
+        class ExpiringCatalog(FakeClient):
+            def catalog_search(self, *, keyword, page, page_size):
+                if self.fail_first:
+                    self.fail_first = False
+                    self.calls.append(("catalog_search", keyword, page, page_size))
+                    raise ServicePortalError("auth_expired", "expired")
+                return super().catalog_search(
+                    keyword=keyword, page=page, page_size=page_size
+                )
+
+        client = ExpiringCatalog(
+            catalog=[{"id": 198, "name": "本科生请销假", "department": "学生工作部门"}],
+            fail_first=True,
+        )
+        service = make_service(tmp_path, client, auto=auto)
+        result = await service.search(keyword="本科生请销假")
+        assert result["status"] == "ok"
+        assert result["session_ref"] == "self"
+        assert result["total"] == 1
+        assert auto.calls == 1
+        assert [call[0] for call in client.calls] == [
+            "catalog_search",
+            "catalog_search",
+        ]
+    asyncio.run(_run())
+
+
+def test_search_clear_during_catalog_read_discards_self_result(tmp_path):
+    async def _run():
+        store = ServicePortalStore(tmp_path)
+        store.replace(session())
+        auto = FakeAuto(error=AssertionError("must not recover"))
+
+        class ClearingCatalog(FakeClient):
+            def catalog_search(self, *, keyword, page, page_size):
+                if not self.calls:
+                    self.calls.append(
+                        ("catalog_search", keyword, page, page_size)
+                    )
+                    store.clear()
+                    return {
+                        "total": 1,
+                        "items": [{"id": 198, "name": "本科生请销假"}],
+                        "catalog": {"total": 1, "complete": True},
+                        "warnings": [],
+                    }
+                return super().catalog_search(
+                    keyword=keyword, page=page, page_size=page_size
+                )
+
+        service = make_service(
+            tmp_path,
+            ClearingCatalog(
+                catalog=[{"id": 198, "name": "本科生请销假"}]
+            ),
+            auto=auto,
+        )
+        result = await service.search(keyword="本科生请销假")
+        assert result["session_ref"] == "anonymous"
+        assert result["public_catalog_only"] is True
+        assert result["coverage"]["auth_error"] == "auth_required"
+        assert auto.calls == 0
+    asyncio.run(_run())
+
+
+def _guide_router(anonymous, authenticated):
+    def factory(cookies):
+        return authenticated if cookies is not None else anonymous
+
+    return factory
+
+
+def test_login_only_guide_uses_same_authenticated_session(tmp_path):
+    async def _run():
+        store = ServicePortalStore(tmp_path)
+        store.replace(session())
+        anonymous = FakeClient()
+        anonymous.guide_error = ServicePortalError("auth_required", "login")
+        authenticated = FakeClient()
+        authenticated.guide_result = {
+            "service_id": 198,
+            "name": "本科生请销假",
+            "department": "学生工作部门",
+            "description": "登录后可见指南",
+            "materials": [],
+            "materials_status": "empty",
+            "warnings": [],
+        }
+        service = ServicePortalService(
+            store,
+            client_factory=_guide_router(anonymous, authenticated),
+            auto_auth=FakeAuto(),
+        )
+        result = await service.guide(198)
+        assert result["status"] == "ok"
+        assert result["session_ref"] == "self"
+        assert result["description"] == "登录后可见指南"
+        assert result["coverage"]["scope"] == "authenticated_guide"
+        assert result["coverage"]["identity_visible_catalog"] is True
+        assert result["coverage"]["identity_scope_complete"] is True
+        assert result["public_guide_only"] is False
+        assert "public_guide_only" not in " ".join(result["warnings"])
+        assert authenticated.calls == [("guide", 198, None)]
+        assert anonymous.calls == []
+    asyncio.run(_run())
+
+
+def test_public_guide_falls_back_anonymously_after_auth_failure(tmp_path):
+    async def _run():
+        store = ServicePortalStore(tmp_path)
+        store.replace(session())
+        anonymous = FakeClient()
+        anonymous.guide_result = {
+            "service_id": 603,
+            "name": "公开事项",
+            "department": "部门",
+            "description": "公开指南",
+            "materials": [],
+            "materials_status": "empty",
+            "warnings": [],
+        }
+        authenticated = FakeClient()
+        authenticated.guide_error = ServicePortalError(
+            "auth_expired", "expired", action="service_portal_auto_auth"
+        )
+        service = ServicePortalService(
+            store,
+            client_factory=_guide_router(anonymous, authenticated),
+            auto_auth=FakeAuto(recover=session()),
+        )
+        result = await service.guide(603)
+        assert result["session_ref"] == "anonymous"
+        assert result["public_guide_only"] is True
+        assert result["coverage"]["scope"] == "public_guide"
+        assert result["coverage"]["auth_error"] == "auth_expired"
+        assert result["next_action"] == "service_portal_auto_auth"
+        assert any(
+            warning.startswith("public_guide_only") for warning in result["warnings"]
+        )
+        assert authenticated.calls == [("guide", 603, None), ("guide", 603, None)]
+        assert anonymous.calls == [("guide", 603, None)]
+    asyncio.run(_run())
+
+
+def test_guide_upstream_failure_is_not_hidden_by_public_fallback(tmp_path):
+    async def _run():
+        store = ServicePortalStore(tmp_path)
+        store.replace(session())
+        anonymous = FakeClient()
+        authenticated = FakeClient()
+        authenticated.guide_error = ServicePortalError(
+            "service_upstream_error", "503"
+        )
+        service = ServicePortalService(
+            store,
+            client_factory=_guide_router(anonymous, authenticated),
+            auto_auth=FakeAuto(),
+        )
+        with pytest.raises(ServicePortalError) as caught:
+            await service.guide(603)
+        assert caught.value.code == "service_upstream_error"
+        assert anonymous.calls == []
+    asyncio.run(_run())
+
+
+def test_todo_and_application_multi_page_coverage_is_explicit(tmp_path):
+    async def _run():
+        store = ServicePortalStore(tmp_path)
+        store.replace(session())
+        client = FakeClient()
+        client.todo = {
+            "total": 45,
+            "page": 2,
+            "page_size": 20,
+            "count": 20,
+            "returned": 20,
+            "empty": False,
+            "empty_page": False,
+            "pages_total": 3,
+            "page_in_range": True,
+            "complete_for_page": True,
+            "complete_for_scope": False,
+            "complete_for_scope_reason": "other_pages_not_included",
+            "has_more": True,
+            "next_page": 3,
+            "remaining_after_page": 5,
+            "items": [],
+            "status_filter": 1,
+        }
+        client.app = {
+            "total": 2,
+            "page": 1,
+            "page_size": 20,
+            "count": 2,
+            "returned": 2,
+            "empty": False,
+            "empty_page": False,
+            "pages_total": 1,
+            "page_in_range": True,
+            "complete_for_page": True,
+            "complete_for_scope": True,
+            "complete_for_scope_reason": "single_page_covers_all",
+            "has_more": False,
+            "next_page": None,
+            "remaining_after_page": 0,
+            "items": [],
+            "third_party_count": 0,
+            "status_filter": 1,
+        }
+        service = make_service(tmp_path, client, auto=FakeAuto())
+        todos = await service.my_todos(page=2, page_size=20)
+        assert todos["coverage"]["scope"] == "pending_at_me"
+        assert todos["coverage"]["complete_for_scope"] is False
+        assert todos["coverage"]["has_more"] is True
+        assert todos["coverage"]["next_page"] == 3
+        assert todos["coverage"]["unread_messages_included"] is False
+        assert any(
+            warning.startswith("scope_not_fully_read") for warning in todos["warnings"]
+        )
+        apps = await service.my_applications(page=1, page_size=20)
+        assert apps["coverage"]["scope"] == "my_applications_in_progress"
+        assert apps["coverage"]["pending_at_me_queue"] is False
+        assert apps["coverage"]["waiting_on_others_possible"] is True
+        assert apps["coverage"]["complete_for_scope"] is True
+        assert apps["coverage"]["third_party_records_marked"] is True
+        assert client.calls == [
+            ("todos", "a" * 64, 2, 20),
+            ("applications", "a" * 64, 1, 20),
+        ]
+    asyncio.run(_run())
+
 
 def test_auto_auth_error_is_fixed_and_does_not_echo_upstream(tmp_path):
     async def _run():

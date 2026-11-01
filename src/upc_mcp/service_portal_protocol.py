@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections import Counter
 from html import unescape
 from html.parser import HTMLParser
 from typing import Any
@@ -21,6 +22,7 @@ import httpx
 SERVICE_HOST = "service.upc.edu.cn"
 BASE_URL = "https://service.upc.edu.cn"
 SEARCH_PATH = "/api/apps/service-list"
+CATALOG_PATH = "/api/apps/list"
 DETAIL_PATH = "/api/apps/detail"
 TODO_PATH = "/site/my-task/todo"
 APPLICATIONS_PATH = "/site/process/inst-list"
@@ -81,6 +83,7 @@ class ServicePortalError(Exception):
             "identity_mismatch": "现有 e站通会话与统一凭据不一致；请先清除该会话。",
             "user_action_required": "e站通要求二次验证；请完成官方交互后重试。",
             "auth_in_progress": "另一次 e站通认证正在进行；本次未重复认证。",
+            "access_denied": "e站通拒绝访问当前事项或账号。",
             "service_timeout": "e站通请求超时。",
             "service_network_error": "e站通网络请求失败。",
             "service_upstream_error": "e站通服务暂时不可用。",
@@ -359,6 +362,50 @@ def _search_item(item: Any) -> dict:
         ),
         "external_host": _url_host(url),
         "folder": _boolish(row.get("is_folder")),
+        "id_ambiguous": False,
+    }
+
+
+def parse_catalog(body: dict) -> dict:
+    """Parse the complete flat ``/api/apps/list`` snapshot.
+
+    The observed authenticated catalog is flat but is not a clean service-only
+    table: it contains folder rows whose ids overlap service ids, and a folder
+    id can therefore repeat.  Rows are preserved in source order; duplicate ids
+    are reported rather than collapsed, because de-duplicating by id would drop
+    a real service.  Folder rows are navigation containers and are excluded
+    from the service search result, but they remain visible in these counts.
+    """
+
+    d = _dict(body.get("d"), field="d")
+    raw = _list(d.get("list"), field="d.list")
+    items = [_search_item(item) for item in raw]
+    id_counts = Counter(item["id"] for item in items)
+    folders = [item for item in items if item["folder"]]
+    services = [item for item in items if not item["folder"]]
+    service_id_counts = Counter(item["id"] for item in services)
+    duplicate_ids = sorted(item_id for item_id, count in id_counts.items() if count > 1)
+    duplicate_service_ids = sorted(
+        item_id for item_id, count in service_id_counts.items() if count > 1
+    )
+    folder_service_ids = {item["id"] for item in folders}
+    service_ids = {item["id"] for item in services}
+    for item in items:
+        item["id_ambiguous"] = id_counts[item["id"]] > 1
+    return {
+        "total": len(items),
+        "items": items,
+        "complete": True,
+        "source": "apps/list",
+        "folder_count": len(folders),
+        "searchable_total": len(services),
+        "duplicate_id_count": len(duplicate_ids),
+        "duplicate_row_count": sum(
+            1 for item in items if id_counts[item["id"]] > 1
+        ),
+        "duplicate_service_id_count": len(duplicate_service_ids),
+        "duplicate_service_ids": duplicate_service_ids[:50],
+        "folder_service_id_collision_count": len(folder_service_ids & service_ids),
     }
 
 
@@ -446,7 +493,9 @@ def parse_guide(body: dict, service_id: int, *, department: str | None) -> dict:
             type_, jump_type, details_page, external_url, has_form=bool(form_count)
         ),
         "is_apply": d.get("is_apply") if isinstance(d.get("is_apply"), bool) else None,
-        "apply_state": "unknown_without_login",
+        "apply_state": "unknown",
+        "apply_state_known": False,
+        "apply_state_basis": "guide_does_not_expose_application_state",
         "description": description,
         "description_length": len(description) if description else 0,
         "description_truncated": bool(
@@ -526,40 +575,98 @@ def project_application(item: Any, account_hash: str | None) -> dict:
     }
 
 
-def parse_todo(body: dict, account_hash: str | None) -> dict:
-    d = _dict(body.get("d"), field="d")
-    items = _list(d.get("list"), field="list")
-    total = _int(d.get("total"), field="total", minimum=0)
-    if total < len(items):
-        raise ServicePortalError("schema_changed", "e站通待办总数小于本页条数。")
-    projected = [project_todo(item, account_hash) for item in items]
+def _page_contract(
+    *, page: int, page_size: int, total: int, count: int
+) -> dict:
+    """Describe one observed page without claiming other pages were read."""
+
+    pages_total = max(1, (total + page_size - 1) // page_size)
+    offset = (page - 1) * page_size
+    page_in_range = page <= pages_total
+    expected = min(page_size, max(0, total - offset))
+    has_more = offset + count < total
     return {
-        "total": total,
-        "count": len(projected),
-        "empty": not projected,
-        "has_more": total > len(projected),
-        "items": projected,
-        "status_filter": 1,
-        "page": 1,
+        "pages_total": pages_total,
+        "page_in_range": page_in_range,
+        "complete_for_page": page_in_range and count == expected,
+        "has_more": has_more,
+        "next_page": page + 1 if has_more else None,
+        "remaining_after_page": max(0, total - offset - count),
     }
 
 
-def parse_applications(body: dict, account_hash: str | None) -> dict:
+def parse_todo(body: dict, account_hash: str | None, *, page: int, page_size: int) -> dict:
     d = _dict(body.get("d"), field="d")
     items = _list(d.get("list"), field="list")
     total = _int(d.get("total"), field="total", minimum=0)
-    if total < len(items):
-        raise ServicePortalError("schema_changed", "e站通申请总数小于本页条数。")
-    projected = [project_application(item, account_hash) for item in items]
+    if len(items) > page_size:
+        raise ServicePortalError("schema_changed", "e站通待办单页条数超过请求上限。")
+    offset = (page - 1) * page_size
+    if items and offset + len(items) > total:
+        raise ServicePortalError("schema_changed", "e站通待办分页与总数不一致。")
+    projected = [project_todo(item, account_hash) for item in items]
+    pagination = _page_contract(
+        page=page, page_size=page_size, total=total, count=len(projected)
+    )
+    if total == 0:
+        complete_for_scope, scope_reason = True, "empty_scope"
+    elif page == 1 and len(projected) == total:
+        complete_for_scope, scope_reason = True, "single_page_covers_all"
+    else:
+        complete_for_scope, scope_reason = False, "other_pages_not_included"
     return {
         "total": total,
+        "page": page,
+        "page_size": page_size,
         "count": len(projected),
-        "empty": not projected,
-        "has_more": total > len(projected),
+        "returned": len(projected),
+        "empty": total == 0,
+        "empty_page": not projected,
+        "complete_for_scope": complete_for_scope,
+        "complete_for_scope_reason": scope_reason,
+        **pagination,
+        "items": projected,
+        "status_filter": 1,
+        "status_filter_source": "verified_request_filter",
+    }
+
+
+def parse_applications(
+    body: dict, account_hash: str | None, *, page: int, page_size: int
+) -> dict:
+    d = _dict(body.get("d"), field="d")
+    items = _list(d.get("list"), field="list")
+    total = _int(d.get("total"), field="total", minimum=0)
+    if len(items) > page_size:
+        raise ServicePortalError("schema_changed", "e站通申请单页条数超过请求上限。")
+    offset = (page - 1) * page_size
+    if items and offset + len(items) > total:
+        raise ServicePortalError("schema_changed", "e站通申请分页与总数不一致。")
+    projected = [project_application(item, account_hash) for item in items]
+    pagination = _page_contract(
+        page=page, page_size=page_size, total=total, count=len(projected)
+    )
+    if total == 0:
+        complete_for_scope, scope_reason = True, "empty_scope"
+    elif page == 1 and len(projected) == total:
+        complete_for_scope, scope_reason = True, "single_page_covers_all"
+    else:
+        complete_for_scope, scope_reason = False, "other_pages_not_included"
+    return {
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "count": len(projected),
+        "returned": len(projected),
+        "empty": total == 0,
+        "empty_page": not projected,
+        "complete_for_scope": complete_for_scope,
+        "complete_for_scope_reason": scope_reason,
+        **pagination,
         "items": projected,
         "third_party_count": sum(1 for item in projected if item["third_party"]),
         "status_filter": 1,
-        "page": 1,
+        "status_filter_source": "verified_request_filter",
     }
 
 
@@ -620,7 +727,9 @@ class ServicePortalClient:
                             action="service_portal_auto_auth",
                         )
                     raise ServicePortalError("unexpected_redirect", "e站通返回了非预期跳转。")
-                if response.status_code in {401, 403}:
+                if response.status_code == 403:
+                    raise ServicePortalError("access_denied", "e站通拒绝访问。")
+                if response.status_code == 401:
                     raise ServicePortalError(
                         "auth_required",
                         "e站通拒绝了当前会话。",
@@ -662,21 +771,92 @@ class ServicePortalClient:
         body = self._request(SEARCH_PATH, params=params)
         return parse_search(body, page=page, page_size=page_size)
 
+    def catalog(self) -> dict:
+        body = self._request(CATALOG_PATH)
+        return parse_catalog(body)
+
+    def catalog_search(
+        self, *, keyword: str | None, page: int, page_size: int
+    ) -> dict:
+        catalog = self.catalog()
+        needle = (keyword or "").strip().casefold()
+        terms = [term for term in needle.split() if term]
+        # Folder rows are navigation containers whose ids collide with real
+        # services in the observed snapshot.  They are counted and reported by
+        # the catalog metadata but are not returned as selectable services.
+        searchable = [item for item in catalog["items"] if not item["folder"]]
+
+        def matches(item: dict) -> bool:
+            if not terms:
+                return True
+            haystack = " ".join(
+                value
+                for value in (item.get("name"), item.get("department"))
+                if value
+            ).casefold()
+            return all(term in haystack for term in terms)
+
+        matched = [item for item in searchable if matches(item)]
+        start = (page - 1) * page_size
+        items = matched[start : start + page_size]
+        pagination = _page_contract(
+            page=page, page_size=page_size, total=len(matched), count=len(items)
+        )
+        warnings: list[str] = []
+        if catalog["folder_count"]:
+            warnings.append("catalog_folders_excluded")
+        if catalog["duplicate_service_id_count"]:
+            warnings.append("catalog_duplicate_service_ids")
+        if catalog["folder_service_id_collision_count"]:
+            warnings.append("catalog_folder_id_collisions")
+        catalog_meta = {
+            key: value
+            for key, value in catalog.items()
+            if key != "items"
+        }
+        catalog_meta["matched_total"] = len(matched)
+        catalog_meta["retrieved_via"] = CATALOG_PATH
+        return {
+            "total": len(matched),
+            "page": page,
+            "page_size": page_size,
+            "count": len(items),
+            "returned": len(items),
+            "empty": not matched,
+            "empty_page": not items,
+            "complete_for_scope": catalog["complete"] is True,
+            "complete_for_scope_reason": "full_catalog_fetched",
+            **pagination,
+            "items": items,
+            "catalog": catalog_meta,
+            "warnings": warnings,
+        }
+
     def guide(self, service_id: int, *, department: str | None) -> dict:
         body = self._request(DETAIL_PATH, params={"id": service_id, "userview": 1})
         return parse_guide(body, service_id, department=department)
 
-    def todos(self, account_hash: str | None) -> dict:
+    def todos(
+        self, account_hash: str | None, *, page: int = 1, page_size: int = 20
+    ) -> dict:
         body = self._request(
-            TODO_PATH, params={"p": 1, "page_size": 20, "status": 1}, personal=True
+            TODO_PATH,
+            params={"p": page, "page_size": page_size, "status": 1},
+            personal=True,
         )
-        return parse_todo(body, account_hash)
+        return parse_todo(body, account_hash, page=page, page_size=page_size)
 
-    def applications(self, account_hash: str | None) -> dict:
+    def applications(
+        self, account_hash: str | None, *, page: int = 1, page_size: int = 20
+    ) -> dict:
         body = self._request(
-            APPLICATIONS_PATH, params={"p": 1, "status": 1}, personal=True
+            APPLICATIONS_PATH,
+            params={"p": page, "page_size": page_size, "status": 1},
+            personal=True,
         )
-        return parse_applications(body, account_hash)
+        return parse_applications(
+            body, account_hash, page=page, page_size=page_size
+        )
 
     def verify(self) -> dict:
         body = self._request(COUNT_PATH, personal=True)

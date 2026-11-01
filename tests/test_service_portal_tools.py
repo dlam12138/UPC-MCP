@@ -35,10 +35,8 @@ class FakeService:
             "materials": None,
         }
 
-    async def my_todos(self, *, page):
-        self.calls.append(("todos", page))
-        if page != 1:
-            raise ServicePortalError("invalid_input", "only page 1")
+    async def my_todos(self, *, page, page_size=20):
+        self.calls.append(("todos", page, page_size))
         return {
             "status": "ok",
             "source_system": "service_portal",
@@ -47,8 +45,8 @@ class FakeService:
             "items": [],
         }
 
-    async def my_applications(self, *, page):
-        self.calls.append(("applications", page))
+    async def my_applications(self, *, page, page_size=20):
+        self.calls.append(("applications", page, page_size))
         return {
             "status": "ok",
             "source_system": "service_portal",
@@ -86,13 +84,21 @@ def test_inprocess_discovery_and_schemas():
             assert search.input_schema.get("required", []) == []
             assert search.annotations.read_only_hint is True
             assert search.annotations.destructive_hint is False
+            description = search.description or ""
+            assert "service5" not in description.lower()
+            assert "saved account" in description
             guide = by_name["upc_service_guide"]
             assert set(guide.input_schema["properties"]) == {"service_id"}
             assert guide.input_schema["required"] == ["service_id"]
+            assert "start-info" in (guide.description or "")
             for name in ("upc_service_my_todos", "upc_service_my_applications"):
                 tool = by_name[name]
-                assert set(tool.input_schema["properties"]) == {"page", "session_ref"}
-                assert tool.input_schema["properties"]["page"]["maximum"] == 1
+                assert set(tool.input_schema["properties"]) == {
+                    "page",
+                    "page_size",
+                    "session_ref",
+                }
+                assert tool.input_schema["properties"]["page"]["maximum"] == 50
                 assert tool.input_schema["properties"]["page"]["minimum"] == 1
                 schema = json.dumps(tool.input_schema).lower()
                 for forbidden in ("url", "header", "cookie", "account", "token"):
@@ -120,11 +126,11 @@ def test_calls_and_fixed_error_mapping():
             assert fake.calls == [
                 ("search", "事项", 2, 10),
                 ("guide", 603),
-                ("todos", 1),
-                ("applications", 1),
+                ("todos", 1, 20),
+                ("applications", 1, 20),
             ]
-            # In-process schema bounds reject page=2 before the service call.
-            invalid = await client.call_tool("upc_service_my_todos", {"page": 2})
+            # In-process schema bounds reject page=51 before the service call.
+            invalid = await client.call_tool("upc_service_my_todos", {"page": 51})
             assert invalid.is_error
 
     asyncio.run(scenario())
@@ -132,7 +138,7 @@ def test_calls_and_fixed_error_mapping():
 
 def test_tool_error_never_echoes_upstream_message():
     class BadService(FakeService):
-        async def my_todos(self, *, page):
+        async def my_todos(self, *, page, page_size=20):
             raise ServicePortalError(
                 "schema_changed", "raw upstream private message"
             )

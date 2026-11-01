@@ -94,7 +94,7 @@ CLI 输入隐藏。更换账号或密码使用 `credential configure --rebind`�
 & E:/CampusMCP/.venv/Scripts/upc-mcp.exe card-balance configure
 ```
 
-空闲教室和 e站通公开事项/指南无需账号。设置页显示“已保存会话”只代表本地有记录，点击“检查连接”才会在线核验。设置窗口可以关闭，MCP 仍由 AI 客户端独立启动。
+空闲教室无需账号；e站通未配置账号时只能读取公开目录/公开指南，结果会标注 `public_catalog_only`，不代表本人完整可见内容。设置页显示“已保存会话”只代表本地有记录，点击“检查连接”才会在线核验。设置窗口可以关闭，MCP 仍由 AI 客户端独立启动。
 
 ## 排查
 

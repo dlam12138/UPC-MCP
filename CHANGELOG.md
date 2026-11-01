@@ -49,6 +49,20 @@ consumer version is changed here.
 
 ### Fixed
 
+- e站通 `upc_service_search` now reads the complete catalog visible to the
+  saved account (386 rows in the verified snapshot) instead of an anonymous-only
+  lookup (196 rows), then matches and paginates locally. The verified
+  “本科生请销假” item now appears for the saved account. Without a usable
+  account the tool returns the public catalog with
+  `public_catalog_only=true`, `coverage.scope=public_catalog`, explicit
+  warnings and `next_action`; an anonymous miss is no longer presented as
+  proof that the service does not exist. Upstream 5xx/schema failures are
+  surfaced instead of being replaced by a public empty result.
+- e站通 `upc_service_guide` reuses the saved account session when available so
+  login-only guides can be read, while public guides remain available without
+  an account. It still calls only the official detail endpoint and never
+  starts a form, attachment download or application submission.
+
 - Campus-card balance now uses the locally saved unified account's student ID
   automatically. Rebinding follows the new account; clearing credentials blocks
   fallback to a stale standalone profile. In-flight results are discarded after
@@ -101,6 +115,17 @@ consumer version is changed here.
   public MCP tool uses the shared full/overview path.
 
 ### Migration from the published v0.1.0 behavior
+
+- e站通 search now uses the saved account's full visible catalog by default;
+  without a usable account, expect `public_catalog_only=true` and a
+  `public_catalog` coverage scope. `catalog.complete` means only that the source
+  catalog was fetched completely, not that every identity/school system was
+  covered. Per-page completeness is now `complete_for_page`/
+  `complete_for_scope`; the old ambiguous `complete` field is not returned by
+  the search or personal-list payloads.
+- e站通 todo/application results describe one page at a time. Read
+  `total`, `has_more`, `complete_for_page` and `complete_for_scope` before
+  claiming the whole pending queue or application history was read.
 
 - If a caller relied on `building="全部"` returning rooms, it now receives
   `status="overview"`, `rooms=[]`, and `next_action="choose_buildings"`.
