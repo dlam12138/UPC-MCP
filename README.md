@@ -2,7 +2,7 @@
 
 <img src="docs/assets/cover.svg" alt="UPC-MCP — 校园服务，问一句就好" width="100%">
 
-<p><strong>中国石油大学（华东）校园服务 · 本地运行 · MCP</strong></p>
+<p><strong>中国石油大学（华东）校园服务 · 非官方项目 · 本地运行 · MCP</strong></p>
 
 [![Release](https://img.shields.io/github/v/release/dlam12138/UPC-MCP?color=355e45&label=release)](https://github.com/dlam12138/UPC-MCP/releases)
 [![Windows CI](https://github.com/dlam12138/UPC-MCP/actions/workflows/ci.yml/badge.svg)](https://github.com/dlam12138/UPC-MCP/actions/workflows/ci.yml)
@@ -16,7 +16,7 @@
 
 UPC-MCP 将课表、空闲教室、校园卡、唐岛湾剩余电量、石光、图书馆和 e站通接入支持 MCP 的 AI 客户端。你可以直接问“明天上什么课”“学生证补办需要什么材料”，也可以在明确选择目标后报名活动、预约座位。
 
-这是**非官方、面向本人账号的本地校园工具**。账号密码在本机设置页填写，加密保存；无需把密码发给 Agent，也不需要写进 MCP 配置。
+这是**个人开发的非官方项目，与中国石油大学（华东）及相关系统运营方无隶属关系，未经其官方认可或背书**，仅面向本人账号使用。账号密码在本机设置页填写，加密保存；无需把密码发给 Agent，也不需要写进 MCP 配置。
 
 <p align="center"><img src="docs/assets/settings.png" alt="使用合成状态展示的 UPC-MCP 本地账号与连接设置页" width="100%"></p>
 
