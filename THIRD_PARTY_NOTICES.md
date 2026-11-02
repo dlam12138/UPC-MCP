@@ -2,9 +2,10 @@
 
 ## Protocol reference
 
-The campus-card balance, free-classroom and library-seat protocol behavior was
-cross-checked against the MIT-licensed UPCpocket Android project. Its copyright
-notice (Copyright © 2026 3beuml) is retained in this project's MIT license.
+The campus-card balance, free-classroom, Tangdaowan remaining-electricity and
+library-seat protocol behavior was cross-checked against the MIT-licensed
+UPCpocket Android project. Its copyright notice (Copyright © 2026 3beuml) is
+retained in this project's MIT license.
 
 Public website paths, public frontend configuration and request signatures are
 protocol implementation details. They are not a user's password or login token;

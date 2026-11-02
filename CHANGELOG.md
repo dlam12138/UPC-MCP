@@ -2,8 +2,39 @@
 
 ## Unreleased — 2026-11-02
 
-This workspace-only change supersedes the v1.2 classroom contract. Version stays
-`1.2`; no tag, release asset, push or consumer upgrade is made here.
+This workspace-only change adds Tangdaowan remaining electricity and supersedes
+the v1.2 classroom contract. Version stays `1.2`; no tag, release asset, push or
+consumer upgrade is made here. The workspace now exposes 25 tools (23 read-only
+and 2 write); the v1.2 release remains 23.
+
+### Added
+
+- `upc_power_buildings` reads only the current Tangdaowan school form's `lou`
+  option values. It does not query rooms, accept a campus/account/URL/header or
+  maintain a static building mapping. The live directory contains separate
+  normal and “空调” meter options; the tools do not choose between them or map a
+  short name to either one.
+- `upc_power_remaining` requires both `building` and `room` in the tool schema.
+  It queries exactly one explicitly named room and returns the school page's
+  `当前剩余电量` in kWh (`度`), not a money balance and not an arrears amount.
+  Missing/blank input is `missing_input`; invalid values are `invalid_input`;
+  fuzzy or multiple candidates are `ambiguous` without a reading.
+- Precision/ownership guard: a reading is returned only for a unique exact
+  building + room + school system-number match. A candidate table's first-room
+  reading or a grid reading for another room is never adopted.
+- The service is stateless: no state directory, credential store, default room,
+  history, cache, receipt, logging, telemetry or room enumeration. Only an
+  in-memory concurrency gate exists.
+- The transport uses fixed host/path, one GET plus one POST per query, 10s
+  connect/20s read timeouts, a 1 MiB decoded-response limit, `trust_env=False`,
+  no redirect following, no retry, no keep-alive pool and no arbitrary
+  URL/header/cookie input. The observed school endpoint is HTTP, so there is no
+  TLS layer for it; auth redirects/network/schema failures never become 0 kWh.
+- Live boundary evidence: the public form GET was re-checked on 2026-11-02 and
+  returned 39 building options; one synthetic invalid-room POST observed the
+  no-result page. No real room reading was queried. Protocol parsing and
+  candidate/ownership paths are validated with synthetic HTML and HTTP fixtures
+  only.
 
 ### Changed
 

@@ -14,6 +14,8 @@ from .card_balance_profile import CardBalanceStore
 from .card_balance_service import CardBalanceService
 from .classroom_service import ClassroomService
 from .classrooms import ClassroomError
+from .electricity import ElectricityError
+from .electricity_service import ElectricityService
 from .library_seat import LibraryError
 from .library_service import LibraryService
 from .library_session import LibraryStore
@@ -41,6 +43,7 @@ def create_server(directory: Path) -> MCPServer:
         CardBalanceStore(directory), credentials=auto_auth.credentials
     )
     classroom_service = ClassroomService()
+    electricity_service = ElectricityService()
     shiguang_store = ShiguangStore(directory)
     shiguang_service = ShiguangService(shiguang_store, auto_auth=auto_auth)
     library_store = LibraryStore(directory)
@@ -104,6 +107,7 @@ def create_server(directory: Path) -> MCPServer:
                 "authentication_by_system": {
                     "card_balance": "local_self_profile_anonymous_query",
                     "classrooms": "none_public_query",
+                    "power": "none_public_form",
                     "library": "local_dpapi_seat_token_or_unified_cas_auto_auth",
                     "service_portal": (
                         "saved_identity_catalog_or_explicit_public_catalog"
@@ -129,7 +133,20 @@ def create_server(directory: Path) -> MCPServer:
                         "unverified",
                     ],
                     "card_balance_tool": "implemented",
-                    "power": "not_implemented",
+                    "power": "implemented",
+                    "power_campus": "唐岛湾",
+                    "power_campus_id": "tangdaowan",
+                    "power_buildings": "implemented",
+                    "power_remaining": "implemented",
+                    "power_query_scope": "explicit_building_and_room_only",
+                    "power_unit": "kWh",
+                    "power_money_balance": "not_provided_by_source",
+                    "power_arrears": "not_provided_by_source",
+                    "power_other_campuses": "not_implemented",
+                    "power_persistence": "none",
+                    "power_cache": "none",
+                    "power_auth": "none_anonymous_public_form",
+                    "power_real_room_verification": "not_performed",
                     "library": "implemented",
                     "library_filters": "implemented",
                     "library_rooms": "implemented",
@@ -172,6 +189,8 @@ def create_server(directory: Path) -> MCPServer:
                     "upc_session_status",
                     "upc_card_balance",
                     "upc_free_classrooms",
+                    "upc_power_buildings",
+                    "upc_power_remaining",
                     "upc_library_filters",
                     "upc_library_rooms",
                     "upc_library_seats",
@@ -209,6 +228,7 @@ def create_server(directory: Path) -> MCPServer:
                 "automatic_session_refresh_by_system": {
                     "card_balance": "not_required",
                     "classrooms": "not_required",
+                    "power": "not_required",
                     "library": "auto_auth_after_auth_expiry",
                     "service_portal": "auto_auth_after_10042_or_100421",
                     "shiguang": "conditional_cas_sso_or_auto_auth",
@@ -436,6 +456,86 @@ def create_server(directory: Path) -> MCPServer:
             return result(
                 ClassroomError(
                     "local_error", "本地空闲教室服务异常，未返回数据。"
+                ).payload(),
+                True,
+            )
+
+    @server.tool(structured_output=False, annotations=readonly)
+    async def upc_power_buildings() -> CallToolResult:
+        """Read the current official Tangdaowan building-option directory.
+
+        Read-only and anonymous. This makes one fixed public form GET and does
+        not query any room, accept a campus, account, URL, header or cookie, or
+        return a room list. The returned ``id`` values are the school form's
+        live ``option value`` values; this project keeps no static building
+        mapping. Use an ``id`` for ``upc_power_remaining``. Only Tangdaowan is
+        supported.
+        """
+        try:
+            return result(await electricity_service.buildings())
+        except ElectricityError as error:
+            return result(error.payload(), True)
+        except Exception:
+            return result(
+                ElectricityError(
+                    "local_error", "本地电量楼号目录服务异常，未返回数据。"
+                ).payload(),
+                True,
+            )
+
+    @server.tool(structured_output=False, annotations=readonly)
+    async def upc_power_remaining(
+        building: Annotated[
+            str,
+            Field(
+                max_length=100,
+                description=(
+                    "本次用户明确给出的唐岛湾楼号，必须是 upc_power_buildings "
+                    "返回的 id（学校表单 option value）。不得从账号、旧聊天、"
+                    "历史、默认宿舍或其他房间推断。"
+                ),
+            ),
+        ],
+        room: Annotated[
+            str,
+            Field(
+                max_length=64,
+                description=(
+                    "本次用户明确给出的房间号，单次只查这一间。不得枚举、批量"
+                    "试号、复用历史房间或从账号推断。"
+                ),
+            ),
+        ],
+    ) -> CallToolResult:
+        """Read one explicitly named Tangdaowan room's remaining electricity.
+
+        Call only when the current user request itself gives both a building
+        and a room. Never infer, reuse, save or guess either value from the
+        account, earlier chats, defaults, history, widgets or other rooms. One
+        room per call; no enumeration or batch probing. The campus is fixed to
+        Tangdaowan and this tool accepts no campus, URL, header, cookie,
+        account, saved target or arbitrary endpoint.
+
+        The returned value is the school page's ``当前剩余电量`` in kWh
+        (``度``), not a money balance, not an amount owed, and not an arrears
+        field. A unique exact building + room match is required; fuzzy
+        candidates are returned as ``ambiguous`` without a reading. The tool
+        has no cache, default room or persistent state. A missing/blank
+        building or room returns ``missing_input``; an invalid value returns
+        ``invalid_input``.
+        """
+        try:
+            payload = await electricity_service.query(building, room)
+            return result(
+                payload,
+                payload["status"] not in {"ok", "ambiguous"},
+            )
+        except ElectricityError as error:
+            return result(error.payload(), True)
+        except Exception:
+            return result(
+                ElectricityError(
+                    "local_error", "本地电量查询服务异常，未返回数据。"
                 ).payload(),
                 True,
             )

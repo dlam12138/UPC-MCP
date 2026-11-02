@@ -20,6 +20,8 @@ def test_real_stdio_discovery_and_structured_auth_error(tmp_path, mode):
                 "upc_session_status",
                 "upc_card_balance",
                 "upc_free_classrooms",
+                "upc_power_buildings",
+                "upc_power_remaining",
                 "upc_library_filters",
                 "upc_library_rooms",
                 "upc_library_seats",
@@ -102,6 +104,53 @@ def test_real_stdio_discovery_and_structured_auth_error(tmp_path, mode):
             )
             assert classroom_error.is_error
             assert classroom_error.structured_content["status"] == "invalid_campus"
+            power_buildings = next(t for t in tools if t.name == "upc_power_buildings")
+            assert power_buildings.annotations.read_only_hint is True
+            assert power_buildings.annotations.destructive_hint is False
+            assert power_buildings.input_schema.get("properties", {}) == {}
+            assert power_buildings.input_schema.get("required", []) == []
+            power_remaining = next(t for t in tools if t.name == "upc_power_remaining")
+            assert power_remaining.annotations.read_only_hint is True
+            assert power_remaining.annotations.destructive_hint is False
+            assert set(power_remaining.input_schema["properties"]) == {
+                "building",
+                "room",
+            }
+            assert set(power_remaining.input_schema["required"]) == {
+                "building",
+                "room",
+            }
+            power_schema = json.dumps(
+                power_remaining.input_schema, ensure_ascii=False
+            ).lower()
+            for forbidden in (
+                "campus",
+                "url",
+                "cookie",
+                "password",
+                "session_ref",
+                "state_dir",
+                "default_room",
+                "guzhenkou",
+                "古镇口",
+            ):
+                assert forbidden not in power_schema
+            missing_power = await client.call_tool(
+                "upc_power_remaining",
+                {"building": "   ", "room": "SYNTH-ROOM-101"},
+            )
+            assert missing_power.is_error
+            assert missing_power.structured_content["status"] == "missing_input"
+            empty_power = await client.call_tool(
+                "upc_power_remaining",
+                {"building": "", "room": "SYNTH-ROOM-101"},
+            )
+            assert empty_power.is_error
+            assert empty_power.structured_content["status"] == "missing_input"
+            omitted_power = await client.call_tool(
+                "upc_power_remaining", {"building": "SYNTH-BLD-900"}
+            )
+            assert omitted_power.is_error
             filters = next(t for t in tools if t.name == "upc_library_filters")
             assert filters.annotations.read_only_hint is True
             assert set(filters.input_schema["properties"]) == {"session_ref"}
@@ -315,6 +364,36 @@ def test_real_stdio_discovery_and_structured_auth_error(tmp_path, mode):
             assert settings["loopback_only"] is True
             assert not capabilities.is_error
             assert capabilities.structured_content["capabilities"]["card_transactions"] == "retired"
+            assert capabilities.structured_content["capabilities"]["power"] == "implemented"
+            assert (
+                capabilities.structured_content["capabilities"]["power_campus"]
+                == "唐岛湾"
+            )
+            assert (
+                capabilities.structured_content["capabilities"]["power_unit"] == "kWh"
+            )
+            assert (
+                capabilities.structured_content["capabilities"]["power_persistence"]
+                == "none"
+            )
+            assert (
+                capabilities.structured_content["capabilities"][
+                    "power_other_campuses"
+                ]
+                == "not_implemented"
+            )
+            assert (
+                capabilities.structured_content["authentication_by_system"]["power"]
+                == "none_public_form"
+            )
+            assert (
+                capabilities.structured_content[
+                    "automatic_session_refresh_by_system"
+                ]["power"]
+                == "not_required"
+            )
+            assert "upc_power_buildings" in capabilities.structured_content["read_only_tools"]
+            assert "upc_power_remaining" in capabilities.structured_content["read_only_tools"]
             assert capabilities.structured_content["capabilities"]["classrooms"] == "implemented"
             assert (
                 capabilities.structured_content["capabilities"]["classrooms_overview"]
@@ -465,7 +544,7 @@ def test_stdio_lists_tools_with_corrupt_timetable_session(tmp_path):
         )
         async with Client(launch, mode="auto") as client:
             tools = (await client.list_tools()).tools
-            assert len(tools) == 23
+            assert len(tools) == 25
             assert "upc_timetable_terms" in {t.name for t in tools}
             status = await client.call_tool(
                 "upc_session_status", {"system": "timetable"}
