@@ -1,6 +1,75 @@
 # Changelog
 
+## Unreleased — 2026-11-02
+
+This workspace-only change supersedes the v1.2 classroom contract. Version stays
+`1.2`; no tag, release asset, push or consumer upgrade is made here.
+
+### Changed
+
+- Free classrooms now derive occupancy only from the per-room `detail`
+  endpoint. `search-all` supplies only the `d.all` room directory and
+  `d.listLh` building options. `d.js` no longer vetoes a detail-free room and is
+  never used as an occupied fallback when detail fails; missing, switched or
+  malformed `d.js` is retained only as an ignored diagnostic.
+- Every room in the selected scope is checked through `detail`, including rooms
+  that `d.js` marked occupied. All non-empty blocks for the query date
+  contribute their `lessArr`; a non-empty intersection with the selected
+  periods is `occupied`, an empty intersection is `available`. Detail failure,
+  missing date or malformed structure is `occupancy=unknown`; if every planned
+  detail request fails the query returns `availability_unverified`.
+- Per-room output separates period occupancy from access hints:
+  `occupancy` (`available`/`occupied`/`unknown`), `availability`
+  (`available`/`available_restricted`/`occupied`/`unknown`), and
+  `access_restriction` (name marker, `basis=room_name`, `proves_access=false`).
+  `reserved` is retained as a deprecated name-only alias;
+  `ordinary_self_study` is false for restricted rooms even when detail shows no
+  occupancy.
+- `only_available` now means ordinary self-study recommendation: detail-free
+  and unrestricted. Restricted but detail-free rooms remain visible in
+  `restricted_rooms` with `availability=available_restricted`, and are not
+  returned by `only_available`.
+- `counts` now distinguishes `available` (all detail-free, including
+  restricted), `ordinary_available`, `restricted_available`, `occupied`,
+  `unknown`, `restricted`, `matched` and `returned`.
+- `overview` no longer exports `search_all_occupied`, `candidates`,
+  `candidate_ratio` or `requires_narrowing`. It returns directory totals and
+  `pending_detail` only, with `rooms=[]` and `next_action=choose_buildings`.
+- `availability_certainty` now reflects detail coverage only. Access
+  restriction does not make an otherwise fully checked room `partial`.
+
+### Deprecated
+
+- `include_conflicts` has no effect. `search_all_conflict` is always false and
+  `conflict_candidates` is always empty; the old two-endpoint conflict model is
+  removed from availability decisions.
+
+### Fixed
+
+- A room whose detail record shows no selected-period occupancy is no longer
+  hidden because `d.js` marked it occupied. This covers the 2026-11-02 sampled
+  ZY-B116 case (detail: periods 10–12 on the correct weekday key; selected
+  afternoon free).
+- A detail-occupied room is no longer cleared by a free `d.js` mark (sampled
+  ZY-B218 and ZY-B233 cases).
+
+### Migration from the v1.2 classroom contract
+
+- Read `occupancy` for period occupancy instead of assuming `occupied` came
+  from either endpoint. `occupied` remains a bool/null projection of
+  `occupancy`.
+- Read `access_restriction`/`ordinary_self_study` for recommendation and access
+  hints. `reserved` is a deprecated alias.
+- `only_available=true` now excludes `available_restricted` rooms; read
+  `restricted_rooms` for their records.
+- `overview.counts.candidates` and per-building candidate counts are gone.
+  Use `pending_detail` and select 1–2 buildings for a full detail query.
+- `conflict_candidates` is always empty; do not wait for conflict resolution
+  between `search-all` and `detail`.
+
 ## 1.2 — 2026-11-01
+
+> 空闲教室部分已被上方 Unreleased 取代；以下保留 v1.2 已发布历史记录。
 
 本版汇总 Bug 1–4：修复空闲教室占用判断、余额学号绑定、课表日期与漏查风险、e站通登录目录检索。共 23 个工具（21 只读、2 写操作）。
 

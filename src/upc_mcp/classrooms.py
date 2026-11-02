@@ -2,22 +2,33 @@
 
 This module deliberately has no dependency on the campus-card balance flow,
 Shiguang, CAS, cookies, WeChat, the retired JHZF bill flow, or local credential
-storage. It sends one fixed public form request and parses one public JSON
-response.
+storage. It sends fixed public form requests and parses public JSON responses.
 
-Verified upstream facts (2026-10-27 anonymous page check):
+Verified upstream facts (2026-11-02 anonymous page check):
 
 * entry page: ``https://app.upc.edu.cn/freeclass/wap/default/all``
-* query: ``POST https://app.upc.edu.cn/freeclass/wap/default/search-all``
+* catalog query: ``POST https://app.upc.edu.cn/freeclass/wap/default/search-all``
 * UTF-8 form: ``xq=<campus>&date=YYYY-MM-DD&lh=<building or 全部>`` plus
   repeated, ascending ``jc[]=1..13`` fields;
 * ``Accept: application/json``; no account, Cookie, or token is required;
-* success: ``e=0``; ``d.all`` is the complete room directory grouped by
-  building, ``d.js`` is the union of rooms occupied in any selected period,
-  and ``d.listLh`` is the building option list;
-* compare rooms by ``code``.  A room is unavailable for a multi-period
-  selection if it appears for any selected period.  The aggregate cannot
-  reconstruct per-period state, so this module never fabricates it.
+* ``d.all`` is the complete room directory grouped by building, and
+  ``d.listLh`` is the building option list.  Those two fields are the only
+  inputs used from ``search-all``.
+* ``d.js`` is *not* used for occupancy.  The observed page watches it and may
+  mark rooms as used, but it contradicts per-room detail for sampled rooms
+  (for example ZY-B116).  Missing, malformed or changed ``d.js`` is retained
+  only as an ignored diagnostic and never blocks a valid directory.
+* Per-room occupancy comes only from ``POST .../detail``.  ``d.weekdays``
+  maps the query date to a ``d.kclist`` weekday key; every non-empty ``c_*``
+  block on that day contributes its ``lessArr`` periods.  A non-empty
+  intersection with the selected periods means occupied; an empty
+  intersection means the detail record shows no occupancy.
+* Detail failure, a missing date, a malformed structure or an unqueried room
+  means ``unknown``, never free and never occupied-by-fallback.  If every
+  planned detail request fails, the query returns ``availability_unverified``.
+* Room names containing ``研究生专用``/``教师专用``/``专用教室`` are retained
+  as name-only access hints.  They do not prove admission and are kept
+  separate from period occupancy.
 
 No redirect is followed.  No automatic retry, keep-alive loop, background
 refresh, or school request at import/startup time is implemented.
@@ -32,6 +43,7 @@ import ssl
 from collections.abc import Iterable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from datetime import date as Date
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
@@ -269,36 +281,69 @@ class ClassroomRoom:
     building: str
     campus: str
     capacity: int | None
-    occupied: bool
-    occupancy_source: Literal[
-        "search_all", "detail", "unknown", "conflict", "reserved"
-    ] = "search_all"
-    occupancy_unknown: bool = False
-    search_all_conflict: bool = False
+    occupancy: Literal["available", "occupied", "unknown"] = "unknown"
+    occupancy_source: Literal["detail", "unknown", "unverified"] = "unverified"
+
+    @property
+    def access_restriction(self) -> tuple[str, ...]:
+        """Name-only access hints; never proof of admission or exclusion."""
+
+        return tuple(marker for marker in RESERVED_NAME_MARKERS if marker in self.name)
+
+    @property
+    def reserved(self) -> bool:
+        """Deprecated compatibility alias for a name-only access hint."""
+
+        return bool(self.access_restriction)
+
+    @property
+    def occupancy_unknown(self) -> bool:
+        return self.occupancy == "unknown"
+
+    @property
+    def occupied(self) -> bool | None:
+        """Compatibility projection of :attr:`occupancy`."""
+
+        if self.occupancy == "unknown":
+            return None
+        return self.occupancy == "occupied"
+
+    @property
+    def ordinary_self_study(self) -> bool:
+        return self.occupancy == "available" and not self.access_restriction
+
+    @property
+    def availability(self) -> str:
+        if self.occupancy != "available":
+            return self.occupancy
+        return "available_restricted" if self.access_restriction else "available"
 
     def public(self) -> dict[str, Any]:
-        if self.occupied:
-            availability = "occupied"
-        elif self.search_all_conflict:
-            availability = (
-                "reserved" if is_reserved_name(self.name) else "conflict"
-            )
-        elif self.occupancy_unknown:
-            availability = "unknown"
-        else:
-            availability = "available"
+        markers = self.access_restriction
         return {
             "code": self.code,
             "name": self.name,
             "building": self.building,
             "campus": self.campus,
             "capacity": self.capacity,
-            "occupied": None if self.occupancy_unknown else self.occupied,
-            "availability": availability,
+            "occupied": None if self.occupancy == "unknown" else self.occupancy == "occupied",
+            "occupancy": self.occupancy,
+            "availability": self.availability,
             "occupancy_source": self.occupancy_source,
             "occupancy_unknown": self.occupancy_unknown,
-            "search_all_conflict": self.search_all_conflict,
-            "reserved": is_reserved_name(self.name),
+            "access_restriction": (
+                {
+                    "kind": "name_marker",
+                    "markers": list(markers),
+                    "basis": "room_name",
+                    "proves_access": False,
+                }
+                if markers
+                else None
+            ),
+            "reserved": bool(markers),
+            "ordinary_self_study": self.ordinary_self_study,
+            "search_all_conflict": False,
         }
 
 
@@ -327,30 +372,46 @@ class DetailLookup:
 
 @dataclass(frozen=True)
 class ClassroomVerification:
+    """Coverage of per-room detail records.
+
+    ``search_all_occupied`` is retained only as an ignored diagnostic count of
+    the observed ``d.js`` payload; it does not participate in any decision.
+    ``availability_certainty`` therefore depends only on detail coverage and
+    detail evidence, not on access-restriction name hints.
+    """
+
     search_all_occupied: int = 0
     detail_checked: int = 0
     detail_occupied: int = 0
     detail_failed: int = 0
     unknown: int = 0
-    conflicts: int = 0
-    reserved: int = 0
+    restricted: int = 0
     unqueried: int = 0
     timed_out: int = 0
     checked_all_rooms: bool = True
 
     @property
     def request_complete(self) -> bool:
-        """Whether every planned school request completed without failure.
+        """Whether every planned detail request completed without failure."""
 
-        This is deliberately separate from availability certainty: a conflict
-        or a reserved room can be fully observed and still not be safely
-        usable.
-        """
         return self.detail_failed == 0 and self.unqueried == 0
+
+    @property
+    def conflicts(self) -> int:
+        """Deprecated compatibility constant; search-all conflicts are gone."""
+
+        return 0
+
+    @property
+    def reserved(self) -> int:
+        """Deprecated compatibility alias for ``restricted``."""
+
+        return self.restricted
 
     @property
     def complete(self) -> bool:
         """Deprecated alias for :attr:`request_complete`."""
+
         return self.request_complete
 
     @property
@@ -359,19 +420,21 @@ class ClassroomVerification:
             return "partial"
         if not self.checked_all_rooms:
             return "partial"
-        if self.unknown == 0 and self.conflicts == 0 and self.reserved == 0:
-            return "records_verified"
-        return "partial"
+        if self.unknown:
+            return "partial"
+        return "records_verified"
 
     def public(self) -> dict[str, Any]:
         return {
             "search_all_occupied": self.search_all_occupied,
+            "search_all_occupied_used": False,
             "detail_checked": self.detail_checked,
             "detail_occupied": self.detail_occupied,
             "detail_failed": self.detail_failed,
             "unknown": self.unknown,
-            "conflicts": self.conflicts,
-            "reserved": self.reserved,
+            "conflicts": 0,
+            "reserved": self.restricted,
+            "restricted": self.restricted,
             "unqueried": self.unqueried,
             "timed_out": self.timed_out,
             "checked_all_rooms": self.checked_all_rooms,
@@ -385,6 +448,7 @@ class ClassroomVerification:
 class ClassroomDirectory:
     rooms: tuple[ClassroomRoom, ...]
     building_options: tuple[BuildingOption, ...]
+    search_all_diagnostic: dict[str, Any] = dataclass_field(default_factory=dict)
 
     def public_buildings(self) -> list[str]:
         return [option.id for option in self.building_options]
@@ -522,13 +586,45 @@ def _optional_message(value: object) -> str | None:
     return text[:300] if text else None
 
 
-def parse_response(body: bytes | str, query: ClassroomQuery) -> ClassroomDirectory:
-    """Parse one response while preserving the strict public-page contract.
+def _diagnose_search_all_js(
+    value: object, directory_codes: set[str]
+) -> dict[str, Any]:
+    """Inspect ``d.js`` without letting it affect any occupancy decision."""
 
-    An empty directory is returned as an empty directory, never as "all rooms
-    are free".  The caller decides whether that is an upstream anomaly or a
-    valid empty building filter.
+    diagnostic: dict[str, Any] = {
+        "present": value is not None,
+        "used_for_occupancy": False,
+        "parse_error": None,
+        "occupied_code_count": None,
+        "unknown_code_count": None,
+    }
+    if value is None:
+        return diagnostic
+    try:
+        groups = _grouped_rooms(value, "js")
+        codes: set[str] = set()
+        for _group_name, entries in groups:
+            for item in entries:
+                codes.add(_required_text(item, "code"))
+    except ClassroomError:
+        # The page may change or omit this field.  A malformed d.js is data
+        # noise, not a reason to reject a valid d.all directory.
+        diagnostic["parse_error"] = "invalid_js"
+        return diagnostic
+    diagnostic["occupied_code_count"] = len(codes)
+    diagnostic["unknown_code_count"] = len(codes - directory_codes)
+    return diagnostic
+
+
+def parse_response(body: bytes | str, query: ClassroomQuery) -> ClassroomDirectory:
+    """Parse the directory from one ``search-all`` response.
+
+    Only ``d.all`` and ``d.listLh`` are required.  Room occupancy is not read
+    from ``d.js``: every room starts as ``unknown`` until the per-room detail
+    record is parsed.  An empty directory is returned as an empty directory,
+    never as "all rooms are free".
     """
+
     root = _load_json(body)
     if not isinstance(root, dict):
         raise _invalid("学校返回的教室响应结构已变化。")
@@ -547,7 +643,6 @@ def parse_response(body: bytes | str, query: ClassroomQuery) -> ClassroomDirecto
         raise _invalid("学校返回的教室响应缺少数据对象。")
 
     all_groups = _grouped_rooms(data.get("all"), "all")
-    occupied_groups = _grouped_rooms(data.get("js"), "js")
     building_options = _parse_building_options(data.get("listLh"))
 
     raw_rooms: list[tuple[str, str, str, str, int | None]] = []
@@ -569,14 +664,6 @@ def parse_response(body: bytes | str, query: ClassroomQuery) -> ClassroomDirecto
                 (room_code, room_name, building, campus, _optional_capacity(item))
             )
 
-    occupied_codes: set[str] = set()
-    for _group_name, entries in occupied_groups:
-        for item in entries:
-            occupied_codes.add(_required_text(item, "code"))
-    unknown = occupied_codes - codes
-    if unknown:
-        raise _invalid("学校返回的占用教室未出现在完整教室目录中。")
-
     rooms = tuple(
         ClassroomRoom(
             code=room_code,
@@ -584,11 +671,14 @@ def parse_response(body: bytes | str, query: ClassroomQuery) -> ClassroomDirecto
             building=building,
             campus=campus,
             capacity=capacity,
-            occupied=room_code in occupied_codes,
         )
         for room_code, room_name, building, campus, capacity in raw_rooms
     )
-    return ClassroomDirectory(rooms=rooms, building_options=building_options)
+    return ClassroomDirectory(
+        rooms=rooms,
+        building_options=building_options,
+        search_all_diagnostic=_diagnose_search_all_js(data.get("js"), codes),
+    )
 
 
 def parse_detail(body: bytes | str, query: ClassroomQuery, code: str) -> RoomDetail:
@@ -814,11 +904,12 @@ class FreeClassroomClient:
         deadline: float = DETAIL_DEADLINE_SECONDS,
         gate: asyncio.Semaphore | None = None,
     ) -> dict[str, DetailLookup]:
-        """Verify candidate rooms through the official per-room detail endpoint.
+        """Verify every room in the selected scope through official detail.
 
-        Individual failures are returned as unverified lookups; they must never
-        be interpreted as free.  Every request is issued by this one client and
-        is bounded by ``concurrency`` and the overall ``deadline``.
+        Individual failures are returned as unknown lookups; they must never be
+        interpreted as free or as occupied by a search-all fallback.  Every
+        request is issued by this one client and is bounded by ``concurrency``
+        and the overall ``deadline``.
         """
         unique = list(dict.fromkeys(codes))
         if not unique:
@@ -826,8 +917,8 @@ class FreeClassroomClient:
         if len(unique) > MAX_DETAIL_REQUESTS:
             raise ClassroomError(
                 "too_many_details",
-                "候选教室数量超过本地逐间校验上限；未返回未校验的空闲结论。",
-                details={"candidates": len(unique), "limit": MAX_DETAIL_REQUESTS},
+                "所选范围教室数量超过本地逐间校验上限；未返回未校验的结论。",
+                details={"rooms": len(unique), "limit": MAX_DETAIL_REQUESTS},
             )
         if (
             isinstance(concurrency, bool)

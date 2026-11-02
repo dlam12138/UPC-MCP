@@ -113,9 +113,13 @@ CLI 输入隐藏。更换账号或密码使用 `credential configure --rebind`�
 4. 重新连接 MCP、刷新工具 schema，确认包版本为 `1.2`、工具列表为 **23 项**。自建 harness 若固定 wheel 哈希、工具清单或白名单，需一并更新，不能只修改版本字符串。
 5. 先验证 `upc_capabilities` 和本地会话状态。正常升级不需要重新填写已保存账号；需要在线验证时只做具体只读查询，不测试真实报名或预约提交。
 
+### Unreleased 教室契约（尚未发布）
+
+当前工作区把空闲教室改为：`search-all` 只取目录/楼宇，占用完全由逐间 `detail` 判定；`d.js` 不参与。`overview` 只给目录数和待校验数，选定 1–2 栋后逐间读取；`unknown` 不回退占用，名称受限但详情空闲的房间在 `restricted_rooms`，`only_available` 只给普通自习推荐。该行为尚未进入 v1.2 发布物。
+
 ### 调用行为变化
 
-- 空闲教室 `building="全部"` 默认返回按楼概览，不是房间列表；选定 1–2 栋后查询详情。第 13 节返回 `unsupported_period`。冲突/未验证房间的 `occupied=null`，`only_available` 不包含它们。
+- v1.2 时：空闲教室 `building="全部"` 默认返回按楼概览，不是房间列表；选定 1–2 栋后查询详情。第 13 节返回 `unsupported_period`。冲突/未验证房间的 `occupied=null`，`only_available` 不包含它们。（现已被上方 Unreleased 契约取代）
 - 余额自动跟随设置页学号，更换账号会跟随新学号，清除统一凭据后不退回旧学号。
 - `upc_timetable_range` 支持最多 14 天，按自然日期跨教学周查询。不要从某一周的课程周次外推下一周；课程实例可能同名但时间不同。
 - e站通默认查已保存账号的可见目录；`public_catalog_only=true` 表示仅公开目录。待办和在办申请支持分页，必须检查 `has_more`，不能把单页当完整列表。

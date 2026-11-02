@@ -6,9 +6,14 @@ public responses into bounded, explicit MCP results.
 
 Two scopes are exposed:
 
-* ``overview`` — one ``search-all`` for a campus, per-building counts only;
+* ``overview`` — one ``search-all`` for a campus, directory counts only;
 * ``full`` — one or two buildings (or every building) verified room by room
-  through the official ``detail`` endpoint.
+  through the official ``detail`` endpoint.  The legacy ``query`` entry point
+  uses the same per-room detail path; there is no search-all candidate path.
+
+``search-all`` only supplies the room directory and building options.  Its
+``d.js`` occupancy is never used for a decision, so a room whose detail record
+shows no selected-period occupancy is available even when ``d.js`` marks it.
 """
 
 from __future__ import annotations
@@ -33,7 +38,6 @@ from .classrooms import (
     ClassroomQuery,
     ClassroomVerification,
     FreeClassroomClient,
-    is_reserved_name,
     now,
 )
 
@@ -64,7 +68,7 @@ class ClassroomService:
         self.full_detail_deadline = full_detail_deadline
 
     # ------------------------------------------------------------------
-    # Legacy single-scope query (candidate verification)
+    # Legacy single-scope query (shared per-room verification)
     # ------------------------------------------------------------------
     async def query(
         self,
@@ -103,7 +107,6 @@ class ClassroomService:
         directory, verification = await self._verify_rooms(
             query,
             directory,
-            verify_all=False,
             deadline=self.detail_deadline,
         )
 
@@ -208,7 +211,6 @@ class ClassroomService:
         merged, verification = await self._verify_rooms(
             base,
             merged,
-            verify_all=True,
             deadline=self.full_detail_deadline,
         )
         summaries = self._building_summaries(merged)
@@ -327,33 +329,45 @@ class ClassroomService:
                 if option.id not in seen:
                     options.append(option)
                     seen.add(option.id)
-        return ClassroomDirectory(rooms=rooms, building_options=tuple(options))
+        diagnostic: dict[str, Any] = {}
+        for directory in directories:
+            if directory.search_all_diagnostic:
+                diagnostic = directory.search_all_diagnostic
+                break
+        return ClassroomDirectory(
+            rooms=rooms,
+            building_options=tuple(options),
+            search_all_diagnostic=diagnostic,
+        )
 
     async def _verify_rooms(
         self,
         query: ClassroomQuery,
         directory: ClassroomDirectory,
         *,
-        verify_all: bool,
         deadline: float,
     ) -> tuple[ClassroomDirectory, ClassroomVerification]:
-        """Verify rooms through the official detail endpoint.
+        """Verify every room in the selected scope through official detail.
 
-        ``verify_all=False`` is the legacy candidate path: rooms already marked
-        occupied by ``search-all`` are kept occupied.  ``verify_all=True`` is
-        the full path: every room is checked, and a conflict stays uncertain.
-        Both paths share this loop so they cannot drift.
+        ``search-all`` is used only for the directory.  Every directory room is
+        requested, including rooms that ``d.js`` marked occupied.  A detail
+        success determines period occupancy by intersecting the selected
+        periods with the union of all non-empty blocks' ``lessArr`` for the
+        matching date.  A detail failure is unknown; it never falls back to
+        ``d.js`` occupancy.  If every planned detail request fails, the query
+        raises ``availability_unverified``.
         """
-        codes = [
-            room.code
-            for room in directory.rooms
-            if verify_all or not room.occupied
-        ]
-        search_all_occupied = sum(1 for room in directory.rooms if room.occupied)
+
+        codes = [room.code for room in directory.rooms]
+        search_all_occupied = int(
+            directory.search_all_diagnostic.get("occupied_code_count") or 0
+        )
+        restricted_count = sum(1 for room in directory.rooms if room.access_restriction)
         if not codes:
             return directory, ClassroomVerification(
                 search_all_occupied=search_all_occupied,
-                checked_all_rooms=verify_all,
+                restricted=restricted_count,
+                checked_all_rooms=True,
             )
 
         lookups = await self.client.fetch_details(
@@ -369,8 +383,6 @@ class ClassroomService:
         detail_occupied = 0
         detail_failed = 0
         unknown = 0
-        conflicts = 0
-        reserved_count = 0
         unqueried = sum(
             1
             for lookup in lookups.values()
@@ -382,27 +394,17 @@ class ClassroomService:
             if lookup.error == "detail_timeout"
         )
         for room in directory.rooms:
-            if not verify_all and room.occupied:
-                rooms.append(room)
-                continue
             lookup = lookups.get(room.code)
             if lookup is None or lookup.occupied_periods is None:
                 detail_failed += 1
-                if room.occupied:
-                    # search-all already says occupied; keep the conservative
-                    # answer rather than turning a known occupied room unknown.
-                    rooms.append(room)
-                else:
-                    unknown += 1
-                    rooms.append(
-                        replace(
-                            room,
-                            occupied=False,
-                            occupancy_source="unknown",
-                            occupancy_unknown=True,
-                            search_all_conflict=False,
-                        )
+                unknown += 1
+                rooms.append(
+                    replace(
+                        room,
+                        occupancy="unknown",
+                        occupancy_source="unknown",
                     )
+                )
                 continue
             detail_checked += 1
             if selected & lookup.occupied_periods:
@@ -410,38 +412,16 @@ class ClassroomService:
                 rooms.append(
                     replace(
                         room,
-                        occupied=True,
+                        occupancy="occupied",
                         occupancy_source="detail",
-                        occupancy_unknown=False,
-                        search_all_conflict=False,
-                    )
-                )
-            elif room.occupied:
-                # search-all says occupied, detail says free.  This is evidence
-                # conflict, not a verified free room.  Keep it uncertain even
-                # when the caller asks to include conflict candidates.
-                conflicts += 1
-                reserved = is_reserved_name(room.name)
-                if reserved:
-                    reserved_count += 1
-                unknown += 1
-                rooms.append(
-                    replace(
-                        room,
-                        occupied=False,
-                        occupancy_source="reserved" if reserved else "conflict",
-                        occupancy_unknown=True,
-                        search_all_conflict=True,
                     )
                 )
             else:
                 rooms.append(
                     replace(
                         room,
-                        occupied=False,
+                        occupancy="available",
                         occupancy_source="detail",
-                        occupancy_unknown=False,
-                        search_all_conflict=False,
                     )
                 )
 
@@ -451,11 +431,10 @@ class ClassroomService:
             detail_occupied=detail_occupied,
             detail_failed=detail_failed,
             unknown=unknown,
-            conflicts=conflicts,
-            reserved=reserved_count,
+            restricted=restricted_count,
             unqueried=unqueried,
             timed_out=timed_out,
-            checked_all_rooms=verify_all,
+            checked_all_rooms=True,
         )
         if detail_failed == len(codes):
             reason = "detail_unavailable"
@@ -479,6 +458,7 @@ class ClassroomService:
             ClassroomDirectory(
                 rooms=tuple(rooms),
                 building_options=directory.building_options,
+                search_all_diagnostic=directory.search_all_diagnostic,
             ),
             verification,
         )
@@ -521,31 +501,28 @@ class ClassroomService:
             if building not in wanted:
                 continue
             total = len(rooms)
-            search_all_occupied = sum(1 for room in rooms if room.occupied)
-            candidates = total - search_all_occupied
             summaries.append(
                 {
                     "id": building,
                     "name": names.get(building, building),
                     "total": total,
-                    "search_all_occupied": search_all_occupied,
-                    "candidates": candidates,
-                    "candidate_ratio": round(candidates / total, 3) if total else 0.0,
-                    "requires_narrowing": candidates > 0,
+                    "pending_detail": total,
+                    "requires_detail": total > 0,
                 }
             )
         summaries.sort(key=lambda item: order.get(item["id"], 999))
         selected_ids = [item["id"] for item in summaries]
         total_rooms = sum(item["total"] for item in summaries)
-        total_search = sum(item["search_all_occupied"] for item in summaries)
-        total_candidates = sum(item["candidates"] for item in summaries)
         warnings = [
-            "全部范围只返回按教学楼汇总，不返回具体房间；"
-            "candidates 是 search-all 说空闲的数量，不是最终空闲数。"
+            "overview 只返回学校教室目录的楼宇和教室数，不判断任何房间占用。"
         ]
         if selected is None:
             warnings.append(
-                "请选择 1–2 栋教学楼后使用 mode=full 获取逐间校验后的完整空闲列表。"
+                "请选择 1–2 栋教学楼后使用 mode=full 获取逐间 detail 校验后的记录。"
+            )
+        else:
+            warnings.append(
+                "已按所选楼宇过滤目录；当前仍是 overview，未请求 detail。"
             )
         return {
             "status": "overview",
@@ -570,8 +547,8 @@ class ClassroomService:
             },
             "counts": {
                 "total": total_rooms,
-                "search_all_occupied": total_search,
-                "candidates": total_candidates,
+                "pending_detail": total_rooms,
+                "detail_checked": 0,
             },
             "pagination": {
                 "offset": offset,
@@ -582,13 +559,15 @@ class ClassroomService:
                 "next_offset": None,
             },
             "verification": {
-                "search_all_occupied": total_search,
+                "search_all_occupied": 0,
+                "search_all_occupied_used": False,
                 "detail_checked": 0,
                 "detail_occupied": 0,
                 "detail_failed": 0,
                 "unknown": None,
                 "conflicts": 0,
                 "reserved": 0,
+                "restricted": 0,
                 "unqueried": 0,
                 "timed_out": 0,
                 "checked_all_rooms": False,
@@ -601,7 +580,9 @@ class ClassroomService:
             "availability_certainty": "unverified",
             "reason": "overview_only",
             "rooms": [],
+            "restricted_rooms": [],
             "conflict_candidates": [],
+            "search_all_diagnostic": directory.search_all_diagnostic,
             "request_budget": {
                 "search_all_requests": 1,
                 "detail_requested": 0,
@@ -610,7 +591,7 @@ class ClassroomService:
                 "detail_timed_out": 0,
                 "detail_not_completed": 0,
                 "total_requested": 1,
-                "candidates_not_verified": total_candidates,
+                "candidates_not_verified": 0,
                 "max_detail_requests": MAX_DETAIL_REQUESTS,
                 "max_scope_rooms": MAX_SCOPE_ROOMS,
                 "max_total_requests": MAX_TOTAL_SCOPE_REQUESTS,
@@ -620,22 +601,22 @@ class ClassroomService:
                 "scope_timeout_seconds": SEARCH_ALL_TIMEOUT_SECONDS,
             },
             "evidence": {
-                "source": "学校公开 search-all 记录",
-                "meaning": "只反映学校记录，不是现场空位、预约或准入证明",
-                "cross_check": "none (overview)",
+                "source": "学校公开 search-all 教室目录",
+                "meaning": "只说明目录楼宇和教室数，不判断占用、可用或准入",
+                "cross_check": "none (overview; detail not requested)",
                 "period_13": "unsupported",
             },
             "next_action": "choose_buildings",
             "warnings": warnings,
             "limitations": [
-                "概览模式不请求 detail；counts.candidates 只是 search-all 的候选数，"
-                "不能当作最终空闲房间。",
-                "search-all 的 d.js 对多节次是交集且不含“借用”；必须用 mode=full 逐间校验。",
-                "请选择 1–2 栋教学楼以获得更完整的学校记录对照。",
-                "detail+search-all 仅是学校记录，不是现场空位或准入证明；"
-                "冲突、保留教室和未校验房间都不能当作可用。",
-                "第 13 节未验证：search-all 返回全占用、detail 没有 c_13 数据；"
-                "本工具直接返回 unsupported_period，不猜成 1–12。",
+                "概览模式不请求 detail，不返回任何房间级可用性；"
+                "counts.pending_detail 只是尚待逐间校验的目录数。",
+                "search-all 的 d.js 不参与占用判定，概览也不导出候选空闲数或比例。",
+                "请选择 1–2 栋教学楼以获得逐间 detail 记录。",
+                "detail 失败、超时或结构异常的房间为 unknown，不当作空闲或占用。",
+                "名称含研究生专用/教师专用/专用教室等标记只是名称线索，"
+                "不证明准入；普通自习推荐与占用记录分开。",
+                "第 13 节未验证：本工具直接返回 unsupported_period，不猜成 1–12。",
                 "上午 1–5、下午 6–9、晚上 10–12 仅是学校页面的节次分组，"
                 "本工具不推断具体钟点时间。",
             ],
@@ -654,27 +635,29 @@ class ClassroomService:
             grouped.setdefault(room.building, []).append(room)
         summaries = []
         for building, rooms in grouped.items():
-            available = sum(
-                1 for room in rooms if not room.occupied and not room.occupancy_unknown
+            available = sum(1 for room in rooms if room.occupancy == "available")
+            ordinary_available = sum(
+                1 for room in rooms if room.ordinary_self_study
             )
-            occupied = sum(1 for room in rooms if room.occupied)
-            unknown = sum(1 for room in rooms if room.occupancy_unknown)
-            conflicts = sum(1 for room in rooms if room.search_all_conflict)
-            reserved = sum(
+            restricted_available = sum(
                 1
                 for room in rooms
-                if room.search_all_conflict and is_reserved_name(room.name)
+                if room.occupancy == "available" and room.access_restriction
             )
+            occupied = sum(1 for room in rooms if room.occupancy == "occupied")
+            unknown = sum(1 for room in rooms if room.occupancy == "unknown")
+            restricted = sum(1 for room in rooms if room.access_restriction)
             summaries.append(
                 {
                     "id": building,
                     "name": names.get(building, building),
                     "total": len(rooms),
                     "available": available,
+                    "ordinary_available": ordinary_available,
+                    "restricted_available": restricted_available,
                     "occupied": occupied,
                     "unknown": unknown,
-                    "conflicts": conflicts,
-                    "reserved": reserved,
+                    "restricted": restricted,
                 }
             )
         summaries.sort(key=lambda item: order.get(item["id"], 999))
@@ -745,16 +728,22 @@ class ClassroomService:
 
         rooms = list(directory.rooms)
         available_rooms = [
-            room
-            for room in rooms
-            if not room.occupied
-            and not room.occupancy_unknown
-            and not room.search_all_conflict
+            room for room in rooms if room.occupancy == "available"
         ]
-        occupied_rooms = [room for room in rooms if room.occupied]
-        unknown_rooms = [room for room in rooms if room.occupancy_unknown]
-        conflict_rooms = [room for room in rooms if room.search_all_conflict]
-        matched = available_rooms if only_available else rooms
+        ordinary_rooms = [room for room in rooms if room.ordinary_self_study]
+        restricted_rooms = [
+            room for room in rooms if room.access_restriction
+        ]
+        restricted_available = [
+            room
+            for room in available_rooms
+            if room.access_restriction
+        ]
+        occupied_rooms = [
+            room for room in rooms if room.occupancy == "occupied"
+        ]
+        unknown_rooms = [room for room in rooms if room.occupancy == "unknown"]
+        matched = ordinary_rooms if only_available else rooms
         page = matched[offset : offset + limit]
         has_more = offset + len(page) < len(matched)
         next_offset = offset + len(page) if has_more else None
@@ -765,12 +754,15 @@ class ClassroomService:
             availability = "no_rooms"
         elif not matched:
             status = "empty"
-            if unknown_rooms and not available_rooms:
+            if not available_rooms and unknown_rooms:
                 reason = "verification_incomplete"
                 availability = "unknown"
             elif not available_rooms:
                 reason = "all_occupied"
                 availability = "all_occupied"
+            elif only_available and not ordinary_rooms:
+                reason = "restricted_only"
+                availability = "restricted_only"
             else:
                 reason = "no_matching_rooms"
                 availability = "available"
@@ -779,6 +771,8 @@ class ClassroomService:
             reason = "offset_out_of_range"
             availability = (
                 "available"
+                if ordinary_rooms
+                else "restricted_only"
                 if available_rooms
                 else "unknown"
                 if unknown_rooms
@@ -789,6 +783,8 @@ class ClassroomService:
             reason = None
             availability = (
                 "available"
+                if ordinary_rooms
+                else "restricted_only"
                 if available_rooms
                 else "unknown"
                 if unknown_rooms
@@ -798,45 +794,48 @@ class ClassroomService:
         warnings: list[str] = []
         if unknown_rooms:
             warnings.append(
-                f"{len(unknown_rooms)} 间教室存在冲突、保留标记或 detail 校验失败，"
-                "已标记 uncertain，未计入 available。"
+                f"{len(unknown_rooms)} 间教室的 detail 校验失败、日期缺失或结构异常，"
+                "occupancy=unknown，未计入 available。"
             )
-        if verification.conflicts:
+        if restricted_rooms:
             warnings.append(
-                f"{verification.conflicts} 间教室 search-all 标占用但 detail 未显示占用；"
-                "这是证据冲突，不会升级为 available，已另列 conflict_candidates。"
+                f"{len(restricted_rooms)} 间教室名称含使用限制线索，已单列 "
+                "restricted_rooms；仅名称线索，不证明准入。"
             )
-            if verification.reserved:
-                warnings.append(
-                    f"其中 {verification.reserved} 间名称含保留标记；"
-                    "名称规则只是已知限制线索，不是完整准入识别。"
-                )
+        if restricted_available:
+            warnings.append(
+                f"其中 {len(restricted_available)} 间 detail 记录在所选节次无占用；"
+                "它们仍不是普通自习推荐，不计入 only_available。"
+            )
         if include_conflicts:
             warnings.append(
-                "include_conflicts 已弃用且不再改变可用性：冲突房间只作为"
-                " conflict_candidates 展示，仍为 uncertain，only_available 不返回。"
+                "include_conflicts 已弃用且恒无冲突；d.js 不参与占用判定，"
+                "conflict_candidates 恒为空。"
             )
 
         limitations = [
-            "available 仅表示 search-all 与 detail 的学校记录在所选节次上均未"
-            "显示占用；它不是现场空位、预约或准入证明。",
-            "search-all 的 d.js 对多节次表现为交集且不含“借用”；该交集结论"
-            "只来自已测样本，不能证明学校服务端的一般实现。",
-            "search-all 标占用但 detail 未显示占用的房间是证据冲突："
-            "保留 occupancy_unknown=true，绝不升级为 available；"
-            "冲突房间另列 conflict_candidates。",
-            "include_conflicts 仅为兼容旧调用保留，已不再把冲突房间升级为可用。",
-            "名称含研究生专用/教师专用/专用教室等标记只是保留线索，"
-            "不是完整准入识别；这些房间保持 uncertain。",
-            "detail 的 lessArr 表示课程/借用块覆盖的节次；"
-            "本工具仍只输出所选节次的合并状态，不输出逐节矩阵。",
-            "第 13 节未验证：search-all 返回全占用、detail 没有 c_13 数据；"
-            "本工具返回 unsupported_period，不猜成 1–12。",
+            "available 只表示 detail 记录在所选节次没有非空 lessArr 交集；"
+            "它不是现场空位、预约或准入证明。",
+            "available_restricted 表示 detail 记录空闲但名称含使用限制线索；"
+            "它计入 available，但 ordinary_self_study=false，"
+            "only_available 默认不返回，另见 restricted_rooms。",
+            "search-all 只提供教室目录和楼宇选项；d.js 缺失、畸形或与 detail "
+            "矛盾都不影响占用判定，也不构成冲突。",
+            "detail 失败、超时、日期缺失或结构异常的房间 occupancy=unknown，"
+            "不当作空闲，也不回退为 d.js 占用；全部房间都失败时返回 "
+            "availability_unverified。",
+            "detail 的 lessArr 表示课程/借用块覆盖的节次；本工具汇总当天全部"
+            "非空块后只输出所选节次的合并状态，不输出逐节矩阵。",
+            "名称含研究生专用/教师专用/专用教室等标记只是名称线索，"
+            "不是完整准入识别，也不改变占用记录。",
+            "restricted_rooms 是所选范围全部受限房间，"
+            "不随 only_available 或房间分页变化。",
+            "第 13 节未验证：本工具返回 unsupported_period，不猜成 1–12。",
             "上午 1–5、下午 6–9、晚上 10–12 仅是学校页面的节次分组，"
             "本工具不推断具体钟点时间。",
             "capacity 来自学校返回的 num；缺失或非正数时为 null，未从其他来源推断。",
             "一次查询只返回本次请求的数据，不使用缓存、后台刷新或定时抓取。",
-            "教室目录和占用是公开页面记录，不代表预约、占座或选课结果。",
+            "教室目录和 detail 是公开页面记录，不代表预约、占座或选课结果。",
         ]
         if has_more:
             limitations.append(
@@ -884,8 +883,11 @@ class ClassroomService:
             "counts": {
                 "total": len(rooms),
                 "available": len(available_rooms),
+                "ordinary_available": len(ordinary_rooms),
+                "restricted_available": len(restricted_available),
                 "occupied": len(occupied_rooms),
                 "unknown": len(unknown_rooms),
+                "restricted": len(restricted_rooms),
                 "matched": len(matched),
                 "returned": len(page),
             },
@@ -903,14 +905,14 @@ class ClassroomService:
             "availability_certainty": verification.availability_certainty,
             "reason": reason,
             "rooms": [room.public() for room in page],
-            "conflict_candidates": [
-                room.public() for room in conflict_rooms
-            ],
+            "restricted_rooms": [room.public() for room in restricted_rooms],
+            "conflict_candidates": [],
+            "search_all_diagnostic": directory.search_all_diagnostic,
             "request_budget": request_budget,
             "evidence": {
-                "source": "学校公开 search-all 与 per-room detail 记录",
+                "source": "学校公开 search-all 教室目录与 per-room detail 记录",
                 "meaning": "只反映学校记录，不是现场空位、预约或准入证明",
-                "cross_check": "search-all + detail",
+                "cross_check": "per-room detail; search-all directory only",
                 "period_13": "unsupported",
             },
             "warnings": warnings,

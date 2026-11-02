@@ -94,13 +94,16 @@ def detail_payload(
     blocks: dict[int, list[dict]] | None = None,
     e: object = 0,
     message: str = "操作成功",
+    week_start: str | None = None,
 ) -> dict:
     """Synthetic room-detail response; all values are fabricated.
 
     ``blocks`` maps a weekday index (1–7) to entries such as
     ``{"period": 10, "lessArr": [10, 11, 12], "name": "借用"}``.
+    ``week_start`` defaults to ``date``; pass the preceding Sunday to model the
+    observed Sunday-first ``weekdays`` array.
     """
-    start = Date.fromisoformat(date)
+    start = Date.fromisoformat(week_start or date)
     kclist = {
         str(day): {f"c_{period}": [] for period in range(1, 14)}
         for day in range(1, 8)
@@ -221,16 +224,28 @@ def test_form_is_utf8_sorted_and_uses_repeated_period_keys():
     assert query.public()["selected_period_groups"] == ["上午", "下午"]
 
 
-def test_legacy_candidate_path_is_marked_partial_certainty():
+def test_legacy_query_uses_same_per_room_detail_path():
     body = payload(
         all_groups={BUILDING: [room("A"), room("B")]},
         js_groups={BUILDING: [{"code": "A"}]},
     )
-    result = run(service_for(json_handler(body)))
+    details = {
+        "A": detail_payload(),
+        "B": detail_payload(
+            blocks={1: [{"period": 1, "lessArr": [1], "name": "课程"}]}
+        ),
+    }
+    result = run(service_for(json_handler(body, details=details)))
     assert result["counts"]["available"] == 1
     assert result["counts"]["occupied"] == 1
-    assert result["verification"]["checked_all_rooms"] is False
-    assert result["verification"]["availability_certainty"] == "partial"
+    assert result["counts"]["unknown"] == 0
+    assert result["verification"]["checked_all_rooms"] is True
+    assert result["verification"]["detail_checked"] == 2
+    assert result["verification"]["availability_certainty"] == "records_verified"
+    assert {item["code"]: item["occupancy"] for item in result["rooms"]} == {
+        "A": "available",
+        "B": "occupied",
+    }
 
 
 def test_period_boundaries_accept_one_through_twelve():
@@ -336,16 +351,24 @@ def test_multiple_buildings_occupancy_and_capacity():
             BUILDING: [room("A101"), room("A102", num="55")],
             OTHER_BUILDING: [room("B201", building=OTHER_BUILDING, num=None)],
         },
-        js_groups={
-            BUILDING: [{"code": "A102"}],
-            OTHER_BUILDING: [{"code": "B201"}],
-        },
+        js_groups={},
         buildings=[
             {"id": BUILDING, "name": BUILDING},
             {"id": OTHER_BUILDING, "name": OTHER_BUILDING},
         ],
     )
-    result = run(service_for(json_handler(body)), periods=[2, 1, 1])
+    details = {
+        "A101": detail_payload(),
+        "A102": detail_payload(
+            blocks={1: [{"period": 1, "lessArr": [1, 2]}]}
+        ),
+        "B201": detail_payload(
+            blocks={1: [{"period": 2, "lessArr": [2]}]}
+        ),
+    }
+    result = run(
+        service_for(json_handler(body, details=details)), periods=[2, 1, 1]
+    )
     assert result["status"] == "ok"
     assert result["source_system"] == "classrooms"
     assert result["query"]["campus"] == CAMPUS
@@ -356,8 +379,11 @@ def test_multiple_buildings_occupancy_and_capacity():
     assert result["counts"] == {
         "total": 3,
         "available": 1,
+        "ordinary_available": 1,
+        "restricted_available": 0,
         "occupied": 2,
         "unknown": 0,
+        "restricted": 0,
         "matched": 3,
         "returned": 3,
     }
@@ -410,16 +436,22 @@ def test_empty_selected_building_is_a_filter_empty_not_a_directory_error():
 def test_all_occupied_is_reported_without_hiding_rooms():
     body = payload(
         all_groups={BUILDING: [room("A101"), room("A102")]},
-        js_groups={BUILDING: [{"code": "A101"}, {"code": "A102"}]},
+        js_groups={},
     )
-    result = run(service_for(json_handler(body)))
+    occupied = detail_payload(
+        blocks={1: [{"period": 1, "lessArr": [1]}]}
+    )
+    details = {"A101": occupied, "A102": occupied}
+    result = run(service_for(json_handler(body, details=details)))
     assert result["status"] == "ok"
     assert result["availability"] == "all_occupied"
     assert result["counts"]["available"] == 0
     assert result["counts"]["occupied"] == 2
     assert [item["occupied"] for item in result["rooms"]] == [True, True]
 
-    filtered = run(service_for(json_handler(body)), only_available=True)
+    filtered = run(
+        service_for(json_handler(body, details=details)), only_available=True
+    )
     assert filtered["status"] == "empty"
     assert filtered["reason"] == "all_occupied"
     assert filtered["counts"]["matched"] == 0
@@ -429,16 +461,28 @@ def test_all_occupied_is_reported_without_hiding_rooms():
 def test_only_available_filters_cells_but_keeps_school_counts():
     body = payload(
         all_groups={BUILDING: [room("A101"), room("A102"), room("A103")]},
-        js_groups={BUILDING: [{"code": "A102"}]},
+        js_groups={},
     )
-    result = run(service_for(json_handler(body)), only_available=True)
+    details = {
+        "A101": detail_payload(),
+        "A102": detail_payload(
+            blocks={1: [{"period": 1, "lessArr": [1]}]}
+        ),
+        "A103": detail_payload(),
+    }
+    result = run(
+        service_for(json_handler(body, details=details)), only_available=True
+    )
     assert result["status"] == "ok"
     assert result["query"]["only_available"] is True
     assert result["counts"] == {
         "total": 3,
         "available": 2,
+        "ordinary_available": 2,
+        "restricted_available": 0,
         "occupied": 1,
         "unknown": 0,
+        "restricted": 0,
         "matched": 2,
         "returned": 2,
     }
@@ -536,7 +580,7 @@ def test_detail_rate_limit_is_not_silently_free():
     assert error.value.details["reason"] == "rate_limited"
 
 
-def test_search_all_occupied_rooms_skip_detail_lookup():
+def test_search_all_occupancy_never_skips_or_vetoes_detail():
     body = payload(
         all_groups={BUILDING: [room("A"), room("B")]},
         js_groups={BUILDING: [{"code": "A"}]},
@@ -548,9 +592,14 @@ def test_search_all_occupied_rooms_skip_detail_lookup():
         return httpx.Response(200, json=detail_payload(date=date))
 
     result = run(service_for(json_handler(body, details=details)))
-    assert looked_up == ["B"]
+    assert looked_up == ["A", "B"]
     assert result["verification"]["search_all_occupied"] == 1
-    assert result["verification"]["detail_checked"] == 1
+    assert result["verification"]["search_all_occupied_used"] is False
+    assert result["verification"]["detail_checked"] == 2
+    assert result["counts"]["available"] == 2
+    assert result["counts"]["occupied"] == 0
+    assert result["verification"]["conflicts"] == 0
+    assert result["conflict_candidates"] == []
 
 
 def test_detail_request_is_fixed_and_anonymous():
@@ -785,17 +834,11 @@ def test_malformed_responses_are_schema_changed():
         {"e": 0, "m": "missing d"},
         {"e": 0, "m": "d is list", "d": []},
         {"e": 0, "m": "missing all", "d": {"js": {}, "listLh": []}},
-        {"e": 0, "m": "missing js", "d": {"all": {}, "listLh": []}},
         {"e": 0, "m": "missing listLh", "d": {"all": {}, "js": {}}},
         {
             "e": 0,
             "m": "all non-empty array",
             "d": {"all": [valid_room], "js": {}, "listLh": []},
-        },
-        {
-            "e": 0,
-            "m": "js non-empty array",
-            "d": {"all": {}, "js": [{"code": "A101"}], "listLh": []},
         },
         {
             "e": 0,
@@ -869,20 +912,49 @@ def test_malformed_responses_are_schema_changed():
                 "listLh": [],
             },
         },
-        {
-            "e": 0,
-            "m": "unknown occupied code",
-            "d": {
-                "all": {BUILDING: [room("A101")]},
-                "js": {BUILDING: [{"code": "B999"}]},
-                "listLh": [],
-            },
-        },
     ]
     for body in cases:
         with pytest.raises(ClassroomError) as error:
             run(service_for(json_handler(body)))
         assert error.value.code == "schema_changed", body
+
+
+def test_missing_switched_or_malformed_js_never_blocks_or_decides():
+    base = payload(
+        all_groups={BUILDING: [room("A"), room("B")]},
+        js_groups={BUILDING: [{"code": "A"}]},
+    )
+    variants = [
+        base,
+        {**base, "d": {**base["d"], "js": None}},
+        {**base, "d": {key: value for key, value in base["d"].items() if key != "js"}},
+        {**base, "d": {**base["d"], "js": [{"code": "A"}]}},
+        {**base, "d": {**base["d"], "js": {BUILDING: "bad"}}},
+        {**base, "d": {**base["d"], "js": {BUILDING: [{"no_code": 1}]}}},
+        {**base, "d": {**base["d"], "js": {BUILDING: [{"code": "NOT-IN-DIRECTORY"}]}}},
+    ]
+    details = {
+        "A": detail_payload(),
+        "B": detail_payload(blocks={1: [{"period": 1, "lessArr": [1]}]}),
+    }
+    for body in variants:
+        requested: list[str] = []
+
+        def detail_handler(code, date, request, requested=requested):
+            requested.append(code)
+            return httpx.Response(200, json=details[code])
+
+        result = run(
+            service_for(json_handler(body, details=detail_handler)),
+            periods=[1],
+        )
+        assert requested == ["A", "B"]
+        assert result["counts"]["available"] == 1
+        assert result["counts"]["occupied"] == 1
+        assert result["verification"]["search_all_occupied_used"] is False
+        assert result["verification"]["conflicts"] == 0
+        assert result["conflict_candidates"] == []
+        assert result["search_all_diagnostic"]["used_for_occupancy"] is False
 
 
 @pytest.mark.parametrize(
@@ -1032,7 +1104,7 @@ def _scope_bodies():
                 room("A102", building=BUILDING),
             ]
         },
-        js_groups={BUILDING: [{"code": "A101"}]},
+        js_groups={},
         buildings=SCOPE_OPTIONS,
     )
     south = payload(
@@ -1048,10 +1120,182 @@ def _scope_bodies():
             ],
             OTHER_BUILDING: [room("B101", building=OTHER_BUILDING)],
         },
-        js_groups={BUILDING: [{"code": "A101"}]},
+        js_groups={},
         buildings=SCOPE_OPTIONS,
     )
     return {"全部": all_body, BUILDING: east, OTHER_BUILDING: south}
+
+
+def test_b116_detail_free_is_not_vetoed_by_search_all():
+    building = "卓越教学楼"
+    body = payload(
+        all_groups={
+            building: [
+                room(
+                    "ZY-B116",
+                    name="研究生专用B116",
+                    building=building,
+                    campus=OTHER_CAMPUS,
+                )
+            ]
+        },
+        js_groups={building: [{"code": "ZY-B116"}]},
+        buildings=[{"id": "全部", "name": "全部"}, {"id": building, "name": building}],
+    )
+    details = {
+        "ZY-B116": detail_payload(
+            date="2026-11-02",
+            week_start="2026-11-01",
+            blocks={2: [{"period": 10, "lessArr": [10, 11, 12]}]},
+        )
+    }
+    result = run(
+        service_for(json_handler(body, details=details)),
+        campus=OTHER_CAMPUS,
+        date="2026-11-02",
+        periods=[6, 7, 8, 9],
+        building=building,
+    )
+    assert result["counts"]["available"] == 1
+    assert result["counts"]["ordinary_available"] == 0
+    assert result["counts"]["restricted_available"] == 1
+    assert result["counts"]["occupied"] == 0
+    assert result["counts"]["unknown"] == 0
+    assert result["verification"]["search_all_occupied"] == 1
+    assert result["verification"]["search_all_occupied_used"] is False
+    assert result["rooms"][0]["code"] == "ZY-B116"
+    assert result["rooms"][0]["occupancy"] == "available"
+    assert result["rooms"][0]["availability"] == "available_restricted"
+    assert result["rooms"][0]["ordinary_self_study"] is False
+    assert result["rooms"][0]["access_restriction"]["markers"] == ["研究生专用"]
+    assert [room["code"] for room in result["restricted_rooms"]] == ["ZY-B116"]
+
+
+def test_b218_detail_occupied_is_not_cleared_by_search_all():
+    building = "卓越教学楼"
+    body = payload(
+        all_groups={
+            building: [
+                room("ZY-B218", name="卓越B218", building=building, campus=OTHER_CAMPUS)
+            ]
+        },
+        js_groups={},
+        buildings=[{"id": "全部", "name": "全部"}, {"id": building, "name": building}],
+    )
+    details = {
+        "ZY-B218": detail_payload(
+            date="2026-11-02",
+            week_start="2026-11-01",
+            blocks={
+                2: [
+                    {"period": 3, "lessArr": [3, 4]},
+                    {"period": 6, "lessArr": [6, 7, 8, 9]},
+                ]
+            },
+        )
+    }
+    result = run(
+        service_for(json_handler(body, details=details)),
+        campus=OTHER_CAMPUS,
+        date="2026-11-02",
+        periods=[6, 7, 8, 9],
+        building=building,
+    )
+    assert result["counts"]["available"] == 0
+    assert result["counts"]["occupied"] == 1
+    assert result["rooms"][0]["occupancy"] == "occupied"
+    assert result["rooms"][0]["occupied"] is True
+
+
+def test_b233_partial_periods_are_respected():
+    building = "卓越教学楼"
+    body = payload(
+        all_groups={
+            building: [
+                room("ZY-B233", name="卓越B233", building=building, campus=OTHER_CAMPUS)
+            ]
+        },
+        js_groups={},
+        buildings=[{"id": "全部", "name": "全部"}, {"id": building, "name": building}],
+    )
+    details = {
+        "ZY-B233": detail_payload(
+            date="2026-11-02",
+            week_start="2026-11-01",
+            blocks={2: [{"period": 6, "lessArr": [6, 7]}]},
+        )
+    }
+    afternoon = run(
+        service_for(json_handler(body, details=details)),
+        campus=OTHER_CAMPUS,
+        date="2026-11-02",
+        periods=[6, 7, 8, 9],
+        building=building,
+    )
+    evening = run(
+        service_for(json_handler(body, details=details)),
+        campus=OTHER_CAMPUS,
+        date="2026-11-02",
+        periods=[8, 9],
+        building=building,
+    )
+    assert afternoon["counts"]["occupied"] == 1
+    assert afternoon["rooms"][0]["occupied"] is True
+    assert evening["counts"]["available"] == 1
+    assert evening["rooms"][0]["occupied"] is False
+
+
+def test_restricted_name_can_be_occupied_without_becoming_unknown():
+    body = payload(
+        all_groups={
+            BUILDING: [
+                room("A101", name="A101教师专用", building=BUILDING)
+            ]
+        },
+        js_groups={},
+        buildings=SCOPE_OPTIONS,
+    )
+    details = {
+        "A101": detail_payload(
+            blocks={1: [{"period": 1, "lessArr": [1]}]}
+        )
+    }
+    result = run(
+        service_for(json_handler(body, details=details)),
+        periods=[1],
+        building=BUILDING,
+    )
+    assert result["counts"]["available"] == 0
+    assert result["counts"]["occupied"] == 1
+    assert result["counts"]["unknown"] == 0
+    assert result["counts"]["restricted"] == 1
+    item = result["rooms"][0]
+    assert item["occupancy"] == "occupied"
+    assert item["availability"] == "occupied"
+    assert item["reserved"] is True
+    assert item["access_restriction"]["markers"] == ["教师专用"]
+    assert item["ordinary_self_study"] is False
+    assert [room["code"] for room in result["restricted_rooms"]] == ["A101"]
+
+
+def test_search_all_js_is_diagnostic_only_at_parse_time():
+    query = ClassroomQuery.create(campus=CAMPUS, date=DATE, periods=[1])
+    base = payload(
+        all_groups={BUILDING: [room("A"), room("B")]},
+        js_groups={BUILDING: [{"code": "A"}]},
+    )
+    variants = [
+        ({**base, "d": {key: value for key, value in base["d"].items() if key != "js"}}, None),
+        ({**base, "d": {**base["d"], "js": [{"code": "A"}]}}, "invalid_js"),
+        ({**base, "d": {**base["d"], "js": {BUILDING: "bad"}}}, "invalid_js"),
+        ({**base, "d": {**base["d"], "js": {BUILDING: [{"code": "A"}]}}}, None),
+    ]
+    for body, expected_error in variants:
+        directory = parse_response(json.dumps(body).encode(), query)
+        assert [item.code for item in directory.rooms] == ["A", "B"]
+        diagnostic = directory.search_all_diagnostic
+        assert diagnostic["used_for_occupancy"] is False
+        assert diagnostic["parse_error"] == expected_error
 
 
 def test_scope_auto_all_returns_overview_without_detail():
@@ -1069,25 +1313,26 @@ def test_scope_auto_all_returns_overview_without_detail():
     assert result["next_action"] == "choose_buildings"
     assert result["counts"] == {
         "total": 3,
-        "search_all_occupied": 1,
-        "candidates": 2,
+        "pending_detail": 3,
+        "detail_checked": 0,
     }
     summaries = {item["id"]: item for item in result["building_summaries"]}
     assert summaries[BUILDING] == {
         "id": BUILDING,
         "name": BUILDING,
         "total": 2,
-        "search_all_occupied": 1,
-        "candidates": 1,
-        "candidate_ratio": 0.5,
-        "requires_narrowing": True,
+        "pending_detail": 2,
+        "requires_detail": True,
     }
-    assert summaries[OTHER_BUILDING]["candidates"] == 1
+    assert summaries[OTHER_BUILDING]["pending_detail"] == 1
     assert result["verification"]["detail_checked"] == 0
     assert result["availability_certainty"] == "unverified"
     assert result["request_budget"]["detail_requested"] == 0
-    assert result["request_budget"]["candidates_not_verified"] == 2
+    assert result["request_budget"]["candidates_not_verified"] == 0
     assert result["request_budget"]["total_requested"] == 1
+    serialized = json.dumps(result, ensure_ascii=False)
+    assert "candidate_ratio" not in serialized
+    assert '"candidates"' not in serialized
 
 
 def test_scope_auto_single_building_full_verifies_every_room():
@@ -1102,27 +1347,30 @@ def test_scope_auto_single_building_full_verifies_every_room():
     assert result["status"] == "ok"
     assert result["counts"] == {
         "total": 2,
-        "available": 1,
+        "available": 2,
+        "ordinary_available": 2,
+        "restricted_available": 0,
         "occupied": 0,
-        "unknown": 1,
+        "unknown": 0,
+        "restricted": 0,
         "matched": 2,
         "returned": 2,
     }
-    assert result["verification"]["search_all_occupied"] == 1
+    assert result["verification"]["search_all_occupied"] == 0
     assert result["verification"]["detail_checked"] == 2
-    assert result["verification"]["conflicts"] == 1
-    assert result["verification"]["unknown"] == 1
+    assert result["verification"]["conflicts"] == 0
+    assert result["verification"]["unknown"] == 0
     assert result["verification"]["unqueried"] == 0
     assert result["verification"]["request_complete"] is True
-    assert result["availability_certainty"] == "partial"
+    assert result["availability_certainty"] == "records_verified"
     assert result["request_budget"]["detail_requested"] == 2
     assert result["request_budget"]["detail_attempted"] == 2
     assert result["request_budget"]["detail_unqueried"] == 0
     assert result["request_budget"]["total_requested"] == 3
     rooms = {item["code"]: item for item in result["rooms"]}
-    assert rooms["A101"]["occupancy_source"] == "conflict"
-    assert rooms["A101"]["occupancy_unknown"] is True
-    assert rooms["A101"]["search_all_conflict"] is True
+    assert rooms["A101"]["occupancy_source"] == "detail"
+    assert rooms["A101"]["occupancy"] == "available"
+    assert rooms["A101"]["search_all_conflict"] is False
     assert rooms["A102"]["occupancy_source"] == "detail"
     assert rooms["A102"]["occupied"] is False
 
@@ -1227,7 +1475,7 @@ def test_parent_cancellation_drains_detail_tasks_and_allows_next_query():
     asyncio.run(scenario())
 
 
-def test_scope_full_include_conflicts_does_not_upgrade_conflict():
+def test_scope_include_conflicts_is_deprecated_and_constant_empty():
     details = {"A101": detail_payload(), "A102": detail_payload()}
     result = asyncio.run(
         scope_service(_scope_bodies(), details=details).query_scope(
@@ -1238,19 +1486,17 @@ def test_scope_full_include_conflicts_does_not_upgrade_conflict():
             include_conflicts=True,
         )
     )
-    assert result["counts"]["available"] == 1
-    assert result["counts"]["unknown"] == 1
-    assert result["verification"]["conflicts"] == 1
+    assert result["counts"]["available"] == 2
+    assert result["counts"]["unknown"] == 0
+    assert result["verification"]["conflicts"] == 0
     assert result["verification"]["request_complete"] is True
-    assert result["verification"]["complete"] is True
-    assert result["verification"]["availability_certainty"] == "partial"
+    assert result["verification"]["availability_certainty"] == "records_verified"
     rooms = {item["code"]: item for item in result["rooms"]}
-    assert rooms["A101"]["occupied"] is None
-    assert rooms["A101"]["occupancy_source"] == "conflict"
-    assert rooms["A101"]["occupancy_unknown"] is True
-    assert rooms["A101"]["availability"] == "conflict"
-    assert rooms["A101"]["search_all_conflict"] is True
-    assert [item["code"] for item in result["conflict_candidates"]] == ["A101"]
+    assert rooms["A101"]["occupancy"] == "available"
+    assert rooms["A101"]["availability"] == "available"
+    assert rooms["A101"]["occupancy_source"] == "detail"
+    assert rooms["A101"]["search_all_conflict"] is False
+    assert result["conflict_candidates"] == []
     assert any("已弃用" in warning for warning in result["warnings"])
 
     filtered = asyncio.run(
@@ -1263,11 +1509,11 @@ def test_scope_full_include_conflicts_does_not_upgrade_conflict():
             include_conflicts=True,
         )
     )
-    assert [item["code"] for item in filtered["rooms"]] == ["A102"]
-    assert [item["code"] for item in filtered["conflict_candidates"]] == ["A101"]
+    assert [item["code"] for item in filtered["rooms"]] == ["A101", "A102"]
+    assert filtered["conflict_candidates"] == []
 
 
-def test_scope_reserved_conflict_is_not_released_by_include_conflicts():
+def test_access_restriction_is_separate_from_detail_occupancy():
     body = payload(
         all_groups={
             BUILDING: [
@@ -1291,14 +1537,46 @@ def test_scope_reserved_conflict_is_not_released_by_include_conflicts():
             only_available=False,
         )
     )
-    assert result["counts"]["available"] == 0
-    assert result["counts"]["unknown"] == 1
-    assert result["verification"]["reserved"] == 1
+    assert result["counts"]["available"] == 1
+    assert result["counts"]["ordinary_available"] == 0
+    assert result["counts"]["restricted_available"] == 1
+    assert result["counts"]["restricted"] == 1
+    assert result["counts"]["occupied"] == 0
+    assert result["counts"]["unknown"] == 0
+    assert result["availability"] == "restricted_only"
+    assert result["verification"]["restricted"] == 1
+    assert result["verification"]["availability_certainty"] == "records_verified"
     item = result["rooms"][0]
+    assert item["occupied"] is False
+    assert item["occupancy"] == "available"
+    assert item["availability"] == "available_restricted"
+    assert item["occupancy_unknown"] is False
     assert item["reserved"] is True
-    assert item["occupancy_source"] == "reserved"
-    assert item["occupancy_unknown"] is True
-    assert item["search_all_conflict"] is True
+    assert item["access_restriction"] == {
+        "kind": "name_marker",
+        "markers": ["研究生专用"],
+        "basis": "room_name",
+        "proves_access": False,
+    }
+    assert item["ordinary_self_study"] is False
+    assert item["search_all_conflict"] is False
+    assert [room["code"] for room in result["restricted_rooms"]] == ["A101"]
+    assert result["conflict_candidates"] == []
+
+    filtered = asyncio.run(
+        service.query_scope(
+            campus=CAMPUS,
+            date=DATE,
+            periods=[1],
+            building=BUILDING,
+            only_available=True,
+        )
+    )
+    assert filtered["status"] == "empty"
+    assert filtered["reason"] == "restricted_only"
+    assert filtered["rooms"] == []
+    assert [room["code"] for room in filtered["restricted_rooms"]] == ["A101"]
+
 
 
 def test_scope_two_buildings_merge_and_paginate():
@@ -1357,8 +1635,9 @@ def test_scope_full_all_uses_one_search_all():
     assert result["mode"] == "full"
     assert result["selected_buildings"] == ["全部"]
     assert result["counts"]["total"] == 3
-    assert result["counts"]["available"] == 2
-    assert result["counts"]["unknown"] == 1
+    assert result["counts"]["available"] == 3
+    assert result["counts"]["unknown"] == 0
+    assert result["verification"]["search_all_occupied_used"] is False
 
 
 def test_scope_overview_can_filter_specific_buildings():
@@ -1414,7 +1693,7 @@ def test_scope_invalid_scope_is_rejected_without_network():
     assert called == []
 
 
-def test_scope_partial_detail_failure_keeps_search_all_occupied():
+def test_scope_partial_detail_failure_becomes_unknown_not_search_all():
     bodies = _scope_bodies()
 
     def details(code, date, request):
@@ -1428,13 +1707,42 @@ def test_scope_partial_detail_failure_keeps_search_all_occupied():
         )
     )
     assert result["counts"]["available"] == 1
-    assert result["counts"]["occupied"] == 1
-    assert result["counts"]["unknown"] == 0
+    assert result["counts"]["occupied"] == 0
+    assert result["counts"]["unknown"] == 1
     assert result["verification"]["detail_failed"] == 1
     assert result["verification"]["complete"] is False
     rooms = {item["code"]: item for item in result["rooms"]}
-    assert rooms["A101"]["occupied"] is True
-    assert rooms["A101"]["occupancy_source"] == "search_all"
+    assert rooms["A101"]["occupancy"] == "unknown"
+    assert rooms["A101"]["occupied"] is None
+    assert rooms["A101"]["occupancy_source"] == "unknown"
+    assert rooms["A102"]["occupancy"] == "available"
+
+
+def test_detail_failure_does_not_fall_back_to_search_all_occupancy():
+    body = payload(
+        all_groups={BUILDING: [room("A101"), room("A102")]},
+        js_groups={BUILDING: [{"code": "A101"}]},
+        buildings=SCOPE_OPTIONS,
+    )
+
+    def details(code, date, request):
+        if code == "A101":
+            return httpx.Response(500, json={"e": 1})
+        return httpx.Response(200, json=detail_payload(date=date))
+
+    result = asyncio.run(
+        scope_service({"全部": body, BUILDING: body}, details=details).query_scope(
+            campus=CAMPUS, date=DATE, periods=[1], building=BUILDING
+        )
+    )
+    rooms = {item["code"]: item for item in result["rooms"]}
+    assert rooms["A101"]["occupancy"] == "unknown"
+    assert rooms["A101"]["occupied"] is None
+    assert rooms["A101"]["occupancy_source"] == "unknown"
+    assert rooms["A101"]["search_all_conflict"] is False
+    assert rooms["A102"]["occupancy"] == "available"
+    assert result["counts"]["occupied"] == 0
+    assert result["counts"]["unknown"] == 1
 
 
 def test_scope_all_detail_failure_refuses_free():

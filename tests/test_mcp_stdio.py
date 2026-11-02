@@ -316,6 +316,26 @@ def test_real_stdio_discovery_and_structured_auth_error(tmp_path, mode):
             assert not capabilities.is_error
             assert capabilities.structured_content["capabilities"]["card_transactions"] == "retired"
             assert capabilities.structured_content["capabilities"]["classrooms"] == "implemented"
+            assert (
+                capabilities.structured_content["capabilities"]["classrooms_overview"]
+                == "directory_only"
+            )
+            assert (
+                capabilities.structured_content["capabilities"][
+                    "classrooms_occupancy_source"
+                ]
+                == "detail_only"
+            )
+            assert (
+                capabilities.structured_content["capabilities"][
+                    "classrooms_search_all_occupancy"
+                ]
+                == "ignored"
+            )
+            assert (
+                capabilities.structured_content["capabilities"]["classrooms_conflicts"]
+                == "none"
+            )
             assert capabilities.structured_content["capabilities"]["library"] == "implemented"
             assert (
                 capabilities.structured_content["capabilities"]["library_booking"]

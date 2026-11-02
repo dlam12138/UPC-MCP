@@ -115,9 +115,12 @@ def create_server(directory: Path) -> MCPServer:
                     "card_transactions": "retired",
                     "classrooms": "implemented",
                     "classrooms_scope_modes": ["auto", "overview", "full"],
-                    "classrooms_overview": "implemented",
-                    "classrooms_full_verification": "implemented",
-                    "classrooms_conflicts": "candidates_only",
+                    "classrooms_overview": "directory_only",
+                    "classrooms_full_verification": "detail_per_room",
+                    "classrooms_occupancy_source": "detail_only",
+                    "classrooms_search_all_occupancy": "ignored",
+                    "classrooms_conflicts": "none",
+                    "classrooms_access_restriction": "name_marker_only",
                     "classrooms_supported_periods": [1, 12],
                     "classrooms_period_13": "unsupported",
                     "classrooms_availability_certainty": [
@@ -360,9 +363,9 @@ def create_server(directory: Path) -> MCPServer:
             Literal["auto", "overview", "full"],
             Field(
                 description=(
-                    "auto：全部范围返回按楼概览，1–2 栋走 full；"
-                    "overview：只返回按楼汇总，不查 detail；"
-                    "full：对所选范围（含“全部”）逐间 detail 校验。"
+                    "auto：全部范围返回按楼目录概览，1–2 栋走 full；"
+                    "overview：只返回目录楼宇/教室数，不查 detail、不判断占用；"
+                    "full：对所选范围（含“全部”）每间 detail 校验。"
                 )
             ),
         ] = "auto",
@@ -370,8 +373,9 @@ def create_server(directory: Path) -> MCPServer:
             bool,
             Field(
                 description=(
-                    "true 只返回 available（search-all 与 detail 均未显示占用）的教室；"
-                    "conflict、reserved、unknown 均不返回。"
+                    "true 只返回普通自习推荐：detail 记录在所选节次无占用，"
+                    "且名称没有研究生专用/教师专用/专用教室等限制线索。"
+                    "受限但记录空闲的房间在 restricted_rooms 单列；unknown/occupied 不返回。"
                 )
             ),
         ] = False,
@@ -379,8 +383,8 @@ def create_server(directory: Path) -> MCPServer:
             bool,
             Field(
                 description=(
-                    "已弃用，仅为兼容旧调用保留。true 也不会把冲突房间升级为 available；"
-                    "冲突只作为 conflict_candidates 展示，仍为 uncertain。"
+                    "已弃用，仅为兼容旧调用保留且不改变结果。"
+                    "search-all 的占用集合不参与判定，conflict_candidates 恒为空。"
                 )
             ),
         ] = False,
@@ -392,16 +396,20 @@ def create_server(directory: Path) -> MCPServer:
         Anonymous read-only requests to fixed school endpoints. No account,
         Cookie, URL, header, or arbitrary endpoint is accepted.
 
-        ``mode=auto`` returns a per-building overview when the scope is
-        "全部"; a 1–2 building scope is checked room by room through the
-        official detail endpoint. ``mode=full`` also supports "全部", but that
-        is a deliberately heavy explicit request. Overview ``candidates`` are
-        only search-all candidates, not free rooms.
+        ``search-all`` supplies only the room directory and building options.
+        Its ``d.js`` occupancy is ignored: it neither vetoes a detail-free room
+        nor becomes occupied when detail fails. ``mode=auto`` returns a
+        directory-only per-building overview for "全部"; a 1–2 building scope is
+        checked room by room through the official detail endpoint.
+        ``mode=full`` also supports "全部", but that is a deliberately heavy
+        explicit request. Overview does not return candidate free-room counts.
 
-        ``available`` means both school records show no occupancy for the
-        selected periods; it is not proof of a live empty seat, reservation,
-        or admission. ``availability_certainty`` and ``request_complete``
-        separate record completeness from availability certainty.
+        ``available`` means the per-room detail record has no selected-period
+        ``lessArr`` overlap; it is not proof of a live empty seat, reservation,
+        or admission. Name markers are returned separately as
+        ``access_restriction``; ``available_restricted`` rooms are not ordinary
+        self-study recommendations and are not returned by ``only_available``.
+        ``availability_certainty`` reflects detail coverage only, not access.
 
         If the user already named one or two buildings, query them directly;
         do not ask again. Only an all-building request should start with the

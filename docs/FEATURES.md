@@ -1,12 +1,14 @@
 # 功能与覆盖
 
+> 空闲教室的“search-all 只取目录、逐间 detail 判定占用”属于 Unreleased；v1.2 发布物仍是旧契约。
+
 当前共 23 项工具；21 项只读，2 项需要明确用户目标的提交操作。
 
 | 模块 | 工具 | 说明 |
 | --- | --- | --- |
 | 通用 | `upc_capabilities`、`upc_session_status` | 实现能力、本地状态、设置入口；不请求学校 |
 | 校园卡 | `upc_card_balance` | 本人余额与未结算金额；自动使用本地统一账号的学号 |
-| 教室 | `upc_free_classrooms` | 两校区、日期、1–12 节；全部范围先给按楼概览，1–2 栋可逐间对照学校记录 |
+| 教室 | `upc_free_classrooms` | 两校区、日期、1–12 节；全部范围先给目录概览，1–2 栋逐间 `detail` 判定占用 |
 | 石光 | `upc_shiguang_activities`、`upc_shiguang_activity_detail` | 活动搜索和详情 |
 | 石光 | `upc_shiguang_my_participations`、`upc_shiguang_credits`、`upc_shiguang_report_card` | 本人参与、学分学时、第二课堂成绩单 |
 | 石光 | `upc_shiguang_register_activity` | 普通/社会实践/邀请码报名，唯一石光写工具 |
@@ -20,7 +22,7 @@
 
 - “明天上什么课？”——客户端 Agent 先查当前学期与教学周，再按日期筛选。
 - “下周有啥课？”——“下周”按自然日期范围（如周日至周六）传给 `upc_timetable_range`，最多 14 天；不要只查当前周几天再用 `weeks` 外推。
-- “唐岛湾校区明天下午哪里有空教室？”——明确日期、校区和节次后查询；全部范围先看按楼概览，再选 1–2 栋逐间校验。
+- “唐岛湾校区明天下午哪里有空教室？”——明确日期、校区和节次后查询；全部范围先看目录概览，再选 1–2 栋逐间读取 `detail`；占用只由 `detail` 判定。
 - “东廊和西廊今晚哪里空？”——用 `buildings` 指定这两栋（`mode=full`），工具会逐间核对 `detail`。
 - “学生证补办需要什么材料？”——先搜索事项，再读取官方指南；缺失材料不编造。
 - “本科生请销假在哪？”——已保存账号时检索该账号完整可见目录，命中后用同一账号读取指南；未配置账号时结果会标注只覆盖公开目录，不能据此断言学校没有该事项。
@@ -37,17 +39,17 @@
 - 图书馆真实可约时段正例、非空预约、真实预约提交，以及真实石光报名尚未作为发布验收执行。相关写契约有合成测试，不等于所有线上分支均已验证。
 - CAS 正常密码登录与已有 SSO 恢复有真实证据；CAS 自然失效后再密码重登目前只有合成覆盖，不能承诺永久免交互。
 - 部分系统暂无独立本人身份字段，状态如实返回 `identity_verified=false`；图书馆有独立本人校验。
-- 空闲教室支持 `mode=auto|overview|full`：`building="全部"` 默认只返回按楼汇总（`overview`），不返回房间级空闲列表；选定 1–2 栋后走 `full`，对该范围所有房间逐间对照 `detail` 记录。
+- 空闲教室支持 `mode=auto|overview|full`：`building="全部"` 默认只返回目录概览（`overview`），只给楼宇、教室总数和待逐间校验数，不返回房间级可用性，也不导出 `d.js` 候选空闲数/比例；选定 1–2 栋后走 `full`，对该范围每间教室读取 `detail`。
 - 用户已明确 1–2 栋教学楼时，直接按该范围查询，不要重复追问；只有“全部教学楼”才先返回概览并请用户收窄。
-- `available` 仅表示 `search-all` 与 `detail` 的学校记录在所选节次均未显示占用，不是现场空位、预约或准入证明；`availability_certainty` 表示记录层面的可用性确定程度，`request_complete` 仅表示请求是否完成。
-- `overview` 的 `counts.candidates` 只是 `search-all` 的候选数，不是最终空闲数；必须再选楼对照。
-- 房间级 `occupied` 只在记录确定时为 `true/false`；`occupancy_unknown=true` 时为 `null`，不能用 `false` 推断可用。`availability` 明确区分 `available/occupied/unknown/conflict/reserved`。
-- `full` 中 `search-all` 标占用、`detail` 未显示占用的房间是证据冲突：保留 `occupancy_unknown=true`、`availability=conflict/reserved`，绝不升级为 `available`；另列 `conflict_candidates`。`include_conflicts` 已弃用，不再改变可用性。
-- 名称含“研究生专用/教师专用/专用教室”等标记只是已知限制线索，不是完整准入识别；这些房间保持 uncertain。
-- `detail` 校验失败、超时或未查询的房间标记 uncertain，不计入 `available`；全部计划请求都失败时返回 `availability_unverified`，不返回空闲结论。
-- `search-all` 的多节次交集行为只来自已测样本，不能证明学校服务端的一般实现；工具仍以逐房间 `detail` 记录为准，并明确记录覆盖缺口。
-- 第 13 节未验证：`search-all` 对 0/13/14 返回全部占用，`detail` 的 `c_13` 为空；本工具直接返回 `unsupported_period`，不猜成 1–12，也不把它当作可用。
-- 逐间对照有硬预算：最多 300 个 detail 槽位、303 个计划请求/范围、4 并发、full 60 秒 detail 截止；超限或未查询数量在 `request_budget`/`detail_unqueried` 中明确返回。
+- `search-all` 只提供 `d.all` 教室目录和 `d.listLh` 楼宇选项。`d.js` 不参与占用判定：它既不否决 `detail` 的空闲记录，也不在 `detail` 失败时回退成占用；缺失、畸形、切换都不阻断有效目录，只保留为忽略诊断。
+- `available`/`occupied`/`unknown` 只表示所选节次与逐间 `detail` 记录中当天全部非空块 `lessArr` 的交集：有交集为 `occupied`，无交集为 `available`，`detail` 失败/缺日期/结构异常为 `unknown`。不是现场空位、预约或准入证明。
+- `overview` 只返回目录楼宇/教室总数/`pending_detail`；`rooms=[]`，不调用 `detail`，不返回候选空闲数，`next_action=choose_buildings`。
+- `only_available` 只返回普通自习推荐：`occupancy=available` 且无名称限制线索。名称含“研究生专用/教师专用/专用教室”等只作为 `access_restriction` 名称线索，不证明准入；这类房间即使 `detail` 空闲也保留 `occupancy=available`、`availability=available_restricted`，放在 `restricted_rooms`，不计入 `only_available`。
+- `counts.available` 包含 detail 空闲的受限房间；`counts.ordinary_available` 是不受限的普通推荐数；`counts.restricted_available` 是受限空闲数；`counts.restricted` 是全部受限房间数。`counts.matched` 是应用 `only_available` 后参与分页的数量。
+- `detail` 失败、超时、未查询、日期缺失或结构异常的房间 `occupancy=unknown`、`occupied=null`，不能当作空闲，也不回退成 `d.js` 占用；全部计划请求失败时返回 `availability_unverified`。`availability_certainty` 只表示 detail 覆盖，不把名称限制当作占用未验证。
+- `include_conflicts`、`search_all_conflict`、`conflict_candidates` 仅为兼容保留：`include_conflicts` 不影响判定，`search_all_conflict` 恒为 `false`，`conflict_candidates` 恒为空。
+- 第 13 节未验证：本工具直接返回 `unsupported_period`，不猜成 1–12，也不把它当作可用。
+- 逐间校验有硬预算：最多 300 个 detail 槽位、303 个计划请求/范围、4 并发、full 60 秒 detail 截止；超限或未查询数量在 `request_budget`/`detail_unqueried` 中明确返回。`restricted_rooms` 单列且不分页。
 - 余额的现有学校端点为 HTTP；不会通过代理或关闭 TLS 校验来扩展其他认证路线。
 
 不提供校园卡流水、签到/补签、取消报名、图书馆取消/签到、自动抢座、审批或代提交 e站通申请。
