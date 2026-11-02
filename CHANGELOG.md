@@ -1,11 +1,8 @@
 # Changelog
 
-## Unreleased — 2026-11-02
+## 1.3 — 2026-11-02
 
-This workspace-only change adds Tangdaowan remaining electricity and supersedes
-the v1.2 classroom contract. Version stays `1.2`; no tag, release asset, push or
-consumer upgrade is made here. The workspace now exposes 25 tools (23 read-only
-and 2 write); the v1.2 release remains 23.
+本版包含唐岛湾剩余电量查询与教室 detail-only 占用判定。共 25 个工具（23 只读、2 写操作），保留 v1.2 的其他修复。
 
 ### Added
 
@@ -30,11 +27,10 @@ and 2 write); the v1.2 release remains 23.
   no redirect following, no retry, no keep-alive pool and no arbitrary
   URL/header/cookie input. The observed school endpoint is HTTP, so there is no
   TLS layer for it; auth redirects/network/schema failures never become 0 kWh.
-- Live boundary evidence: the public form GET was re-checked on 2026-11-02 and
-  returned 39 building options; one synthetic invalid-room POST observed the
-  no-result page. No real room reading was queried. Protocol parsing and
-  candidate/ownership paths are validated with synthetic HTML and HTTP fixtures
-  only.
+- Live validation on 2026-11-02: 39 building options, two user-specified real
+  readings and one ambiguous-room rejection. Real building/room identifiers and
+  readings are not included in release files. Other ownership/error branches
+  are covered by synthetic HTML and HTTP fixtures.
 
 ### Changed
 
@@ -100,7 +96,7 @@ and 2 write); the v1.2 release remains 23.
 
 ## 1.2 — 2026-11-01
 
-> 空闲教室部分已被上方 Unreleased 取代；以下保留 v1.2 已发布历史记录。
+> 空闲教室部分已被上方 v1.3 取代；以下保留 v1.2 已发布历史记录。
 
 本版汇总 Bug 1–4：修复空闲教室占用判断、余额学号绑定、课表日期与漏查风险、e站通登录目录检索。共 23 个工具（21 只读、2 写操作）。
 

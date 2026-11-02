@@ -1,6 +1,6 @@
 [project]
 name = "upc-mcp"
-version = "1.2"
+version = "1.3"
 description = "Local, account-bound UPC campus services and settings"
 requires-python = ">=3.12"
 readme = "README.md"

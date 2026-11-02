@@ -10,7 +10,7 @@
 
 ## 方式一：下载源码包
 
-1. 在本仓库 **Releases** 下载 `UPC-MCP-v1.2-source.zip`，解压到自己的目录，例如 `E:/CampusMCP`。
+1. 在本仓库 **Releases** 下载 `UPC-MCP-v1.3-source.zip`，解压到自己的目录，例如 `E:/CampusMCP`。
 2. 双击 `E:/CampusMCP/安装.cmd`。脚本检查 Python、在项目内创建 `.venv` 并安装依赖；不会替换全局 Python。
 3. 在自动打开的本地页面填写学校账号、密码和确认密码，点击“保存账号”。
 4. 在“服务连接”中按需检查平台；打开页面和保存凭据不会自动请求学校。
@@ -46,10 +46,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File E:/CampusMCP/scripts/setup.p
 
 ## 方式三：安装 wheel
 
-从 Releases 下载 `upc_mcp-1.2-py3-none-any.whl`。以下示例假定已创建 Python 虚拟环境 `E:/CampusMCP/.venv`：
+从 Releases 下载 `upc_mcp-1.3-py3-none-any.whl`。以下示例假定已创建 Python 虚拟环境 `E:/CampusMCP/.venv`：
 
 ```powershell
-& E:/CampusMCP/.venv/Scripts/python.exe -m pip install E:/Downloads/upc_mcp-1.2-py3-none-any.whl
+& E:/CampusMCP/.venv/Scripts/python.exe -m pip install E:/Downloads/upc_mcp-1.3-py3-none-any.whl
 & E:/CampusMCP/.venv/Scripts/upc-mcp.exe settings
 & E:/CampusMCP/.venv/Scripts/upc-mcp.exe mcp-config
 ```
@@ -106,34 +106,34 @@ CLI 输入隐藏。更换账号或密码使用 `credential configure --rebind`�
 
 返回值是学校页面的“当前剩余电量”，单位度（kWh），不是人民币余额，也不是欠费金额。学校页面没有提供欠费、金额或电表更新时间；相关字段为 `null` 并标注 `not_provided_by_source`。`fetched_at` 只是本次读取时间。`0 度`是有效读数，不是欠费。
 
-学校端点当前为 HTTP，楼号/房间号在传输中不受 TLS 保护；工具不提供关闭证书校验或任意 URL/header/cookie 的入口。固定主机/路径、连接 10 秒/读取 20 秒、解压后 1 MiB 上限、禁用环境代理、不跟随重定向、不自动重试/保活/轮询。认证跳转、网络、HTTP 或页面结构错误不会变成 0 度。楼号/房间号不写入状态目录、设置、日志、缓存、会话或回执；MCP 客户端和宿主聊天仍可能按自己的策略记录参数。仅支持唐岛湾，古镇口未接入；不提供充值/缴费。真实房间读数尚未作为发布验收。
+学校端点当前为 HTTP，楼号/房间号在传输中不受 TLS 保护；工具不提供关闭证书校验或任意 URL/header/cookie 的入口。固定主机/路径、连接 10 秒/读取 20 秒、解压后 1 MiB 上限、禁用环境代理、不跟随重定向、不自动重试/保活/轮询。认证跳转、网络、HTTP 或页面结构错误不会变成 0 度。楼号/房间号不写入状态目录、设置、日志、缓存、会话或回执；MCP 客户端和宿主聊天仍可能按自己的策略记录参数。仅支持唐岛湾，古镇口未接入；不提供充值/缴费。已按用户指定目标验证两次真实读数及一次模糊匹配拒绝；不保存真实楼房号或读数。
 
-## 从 0.1.0 升级到 1.2
+## 从 0.1.0 或 1.2 升级到 1.3
 
-1. 下载同一 `v1.2` Release 的源码 ZIP 或 wheel，以及 `SHA256SUMS`。用 `Get-FileHash` 查看下载包的 SHA256，与清单对应行比较后安装。
+1. 下载同一 `v1.3` Release 的源码 ZIP 或 wheel，以及 `SHA256SUMS`。用 `Get-FileHash` 查看下载包的 SHA256，与清单对应行比较后安装。
 2. 停止客户端启动的旧 UPC-MCP 进程，保留原状态目录。不要清除凭据，也不要复制别人的会话。默认状态目录仍为 `%LOCALAPPDATA%/UPC-MCP`；自定义目录必须继续传入原来的绝对路径。
 3. 源码安装推荐解压到新目录，在其中运行 `scripts/setup.ps1 -StateDirectory <原状态目录>`。wheel 安装可在原虚拟环境运行：
 
 ```powershell
-& E:/CampusMCP/.venv/Scripts/python.exe -m pip install --upgrade E:/Downloads/upc_mcp-1.2-py3-none-any.whl
+& E:/CampusMCP/.venv/Scripts/python.exe -m pip install --upgrade E:/Downloads/upc_mcp-1.3-py3-none-any.whl
 & E:/CampusMCP/.venv/Scripts/python.exe -c "from importlib.metadata import version; print(version('upc-mcp'))"
 & E:/CampusMCP/.venv/Scripts/upc-mcp.exe --state-dir E:/CampusMCP-data mcp-config
 ```
 
 以上路径为示例；`E:/CampusMCP-data` 只有在它确实是原状态目录时才使用。源码安装更换目录后，用新安装的 `mcp-config` 输出更新客户端命令路径。设置页与 MCP 使用同一个状态目录。
 
-4. 重新连接 MCP、刷新工具 schema，确认包版本为 `1.2`。v1.2 发布物为 **23 项**工具；当前工作区 Unreleased 新增 2 项唐岛湾电量工具，共 **25 项**。自建 harness 若固定 wheel 哈希、工具清单或白名单，需一并更新，不能只修改版本字符串。
+4. 重新连接 MCP、刷新工具 schema，确认包版本为 `1.3`。v1.3 发布物为 **25 项**工具（23 只读、2 写操作）。自建 harness 若固定 wheel 哈希、工具清单或白名单，需一并更新，不能只修改版本字符串。
 5. 先验证 `upc_capabilities` 和本地会话状态。正常升级不需要重新填写已保存账号；需要在线验证时只做具体只读查询，不测试真实报名或预约提交。
 
-### Unreleased 电量与教室契约（尚未发布）
+### v1.3 电量与教室契约
 
-当前工作区新增唐岛湾剩余电量只读工具 `upc_power_buildings` / `upc_power_remaining`：楼号来自学校当前目录，楼号与房间号每次必须由本次请求同时给出；不保存、不缓存、不设默认宿舍，不查古镇口，不提供充值/欠费金额。工具返回度（kWh），不是金额余额。详见上方“唐岛湾剩余电量”。
+本版新增唐岛湾剩余电量只读工具 `upc_power_buildings` / `upc_power_remaining`：楼号来自学校当前目录，楼号与房间号每次必须由本次请求同时给出；不保存、不缓存、不设默认宿舍，不查古镇口，不提供充值/欠费金额。工具返回度（kWh），不是金额余额。详见上方“唐岛湾剩余电量”。
 
-空闲教室改为：`search-all` 只取目录/楼宇，占用完全由逐间 `detail` 判定；`d.js` 不参与。`overview` 只给目录数和待校验数，选定 1–2 栋后逐间读取；`unknown` 不回退占用，名称受限但详情空闲的房间在 `restricted_rooms`，`only_available` 只给普通自习推荐。该行为尚未进入 v1.2 发布物。
+空闲教室改为：`search-all` 只取目录/楼宇，占用完全由逐间 `detail` 判定；`d.js` 不参与。`overview` 只给目录数和待校验数，选定 1–2 栋后逐间读取；`unknown` 不回退占用，名称受限但详情空闲的房间在 `restricted_rooms`，`only_available` 只给普通自习推荐。该行为自 v1.3 生效。
 
 ### 调用行为变化
 
-- v1.2 时：空闲教室 `building="全部"` 默认返回按楼概览，不是房间列表；选定 1–2 栋后查询详情。第 13 节返回 `unsupported_period`。冲突/未验证房间的 `occupied=null`，`only_available` 不包含它们。（现已被上方 Unreleased 契约取代）
+- v1.2 时：空闲教室 `building="全部"` 默认返回按楼概览，不是房间列表；选定 1–2 栋后查询详情。第 13 节返回 `unsupported_period`。冲突/未验证房间的 `occupied=null`，`only_available` 不包含它们。（现已被上方 v1.3 契约取代）
 - 余额自动跟随设置页学号，更换账号会跟随新学号，清除统一凭据后不退回旧学号。
 - 电量查询没有账户绑定或默认目标：每次必须显式给楼号 + 房间号；`ambiguous` 时不要自动选候选。
 - `upc_timetable_range` 支持最多 14 天，按自然日期跨教学周查询。不要从某一周的课程周次外推下一周；课程实例可能同名但时间不同。
@@ -141,7 +141,7 @@ CLI 输入隐藏。更换账号或密码使用 `credential configure --rebind`�
 
 ### 反馈问题
 
-记录 Release `v1.2`、包版本、安装资产 SHA256、Windows/Python 版本、宿主与适配器版本、具体工具和脱敏参数、预期及实际错误码。若经过自建适配器，先用原版 MCP 直连复现；不要上传密码、Cookie、ticket、token、个人课表/申请正文或完整私密日志。
+记录 Release `v1.3`、包版本、安装资产 SHA256、Windows/Python 版本、宿主与适配器版本、具体工具和脱敏参数、预期及实际错误码。若经过自建适配器，先用原版 MCP 直连复现；不要上传密码、Cookie、ticket、token、个人课表/申请正文或完整私密日志。
 
 ## 排查
 

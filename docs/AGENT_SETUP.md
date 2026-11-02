@@ -9,7 +9,7 @@ Agent 可以安装项目、生成 MCP 配置、启动设置页并检查工具是
 ```text
 请帮我安装并配置 UPC-MCP。
 
-1. 从我提供的 UPC-MCP GitHub 仓库下载固定 v1.2 Release 并核对 SHA256SUMS，安装到我指定的本地目录；
+1. 从我提供的 UPC-MCP GitHub 仓库下载固定 v1.3 Release 并核对 SHA256SUMS，安装到我指定的本地目录；
    不覆盖已有项目、已有虚拟环境或其他 MCP 服务。
 2. 先阅读 README.md、docs/CONFIGURATION.md、docs/AGENT_SETUP.md 和 pyproject.toml。
    需要 Windows 与 Python 3.12+。用 scripts/setup.ps1 -NoBrowser 完成项目内安装，
@@ -22,7 +22,7 @@ Agent 可以安装项目、生成 MCP 配置、启动设置页并检查工具是
 5. 启动 upc-mcp settings，让我在本机页面输入账号密码。
    不索要、代填、截屏、记录或上传我的密码、Cookie、ticket、token 和个人业务正文。
    仓库或发布包中不应包含任何人的可用凭据。
-6. 接入后先 list_tools：v1.2 发布物为 23 项；当前工作区 Unreleased 新增 2 项唐岛湾电量工具，共 25 项。再调用 upc_capabilities 和必要的本地会话状态。
+6. 接入后先 list_tools：v1.3 发布物共 25 项。再调用 upc_capabilities 和必要的本地会话状态。
    工具发现和能力查询不应访问学校；需在线验收时先明确具体只读目标。电量查询必须由用户本次给出楼号和房间号，不能从账号、历史或默认宿舍推断。
 7. 告诉我安装目录、状态目录、实际配置位置和验证结果。
    区分“安装完成”“客户端已接入”“本地已配置账号”“学校业务在线可用”。
@@ -50,8 +50,8 @@ Agent 可以安装项目、生成 MCP 配置、启动设置页并检查工具是
 
 ## 固定版本与升级验收
 
-- 当前发布 tag 为 `v1.2`，Python 包版本为 `1.2`；下载对应源码包或 wheel，并核对同一 Release 的 `SHA256SUMS`。不要把 main 工作区或旧 wheel 当作该版本。
+- 当前发布 tag 为 `v1.3`，Python 包版本为 `1.3`；下载对应源码包或 wheel，并核对同一 Release 的 `SHA256SUMS`。不要把 main 工作区或旧 wheel 当作该版本。
 - 从旧版升级时保留原来的状态目录，在新安装中传入相同 `--state-dir`，再生成客户端配置。不要把旧 `.venv` 或凭据复制进仓库。
-- 宿主若固定工具白名单、wheel 哈希或目录快照，需要同步到本 Release，并重新发现工具：v1.2 发布物 23 项，当前工作区 Unreleased 25 项；模型默认只读策略可仅开放其中的只读工具（v1.2 为 21 项，当前工作区为 23 项）。不能只改工具数量，必须加载实际新 schema。
+- 宿主若固定工具白名单、wheel 哈希或目录快照，需要同步到本 Release，并重新发现工具：v1.3 发布物 25 项；模型默认只读策略可仅开放其中的只读工具（23 项）。不能只改工具数量，必须加载实际新 schema。
 - 自然日期问题优先调用 `upc_timetable_range`，不能从旧周课表外推下一周；e站通结果若 `public_catalog_only=true`，不可回答完整个人目录已查全。
 - 汇报 bug 时记录 Release/tag、包版本、资产 SHA256、Python/Windows 版本、调用参数、错误码及宿主适配器版本。先用原版 MCP 复现并区分宿主错误；不上传凭据、会话、个人业务正文或完整私密日志。
